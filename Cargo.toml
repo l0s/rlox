@@ -1,0 +1,12 @@
+[package]
+name = "rlox"
+version = "0.1.0"
+edition = "2021"
+authors = ["Carlos Macasaet"]
+description = "Interpreter for the Lox language: https://craftinginterpreters.com"
+
+[dependencies]
+bigdecimal = "0.4.7"
+itertools = "0.13.0"
+phf = { version = "0.11.2", features = ["macros"] }
+unicode-segmentation = "1.12.0"
