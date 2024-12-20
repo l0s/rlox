@@ -52,7 +52,10 @@ pub(crate) enum TokenType {
     Variable,
     While,
 
+    /// A comment that terminates at the end of the line
     LineComment,
+    /// A comment that may span multiple lines. It has an opening and closing symbol.
+    BlockComment,
 
     Eof,
 }

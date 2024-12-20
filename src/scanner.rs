@@ -2,7 +2,6 @@ use std::iter::Iterator;
 use std::str::FromStr;
 
 use bigdecimal::BigDecimal;
-use itertools::Itertools;
 use phf::phf_map;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -115,16 +114,27 @@ impl<'a> Scanner<'a> {
             ))),
             // 1+ length lexemes
             "/" => {
-                let token_type =
-                    self.conditional_advance("/", TokenType::LineComment, TokenType::ForwardSlash);
-                if token_type == TokenType::LineComment {
-                    // A line comment goes until the end of the line, so consume those graphemes
-                    while self.peek() != "\n" && !self.at_end() {
-                        self.advance();
+                // This can be "/", "//", or "/*"
+                let token_type = if self.at_end() {
+                    TokenType::ForwardSlash
+                } else {
+                    let next = self.graphemes[self.current];
+                    match next {
+                        "/" => {
+                            self.current += 1;
+                            TokenType::LineComment
+                        }
+                        "*" => {
+                            self.current += 1;
+                            TokenType::BlockComment
+                        }
+                        _ => TokenType::ForwardSlash,
                     }
-                    // drop comments early,
-                    // don't emit a token
-                    Ok(None)
+                };
+                if token_type == TokenType::LineComment {
+                    self.line_comment()
+                } else if token_type == TokenType::BlockComment {
+                    self.block_comment()
                 } else {
                     // TokenType::ForwardSlash
                     Ok(Some(Token::new(token_type, lexeme, self.line)))
@@ -160,6 +170,40 @@ impl<'a> Scanner<'a> {
             }
             Err(error) => self.errors.push(error),
         }
+    }
+
+    fn block_comment(&mut self) -> Result<Option<Token>, LexicalError> {
+        // A block comment goes until "*/", so consume those graphemes
+        while !self.at_end() && self.peek() != "*" && self.peek_next() != "/" {
+            if self.peek() == "\n" {
+                self.line += 1;
+            }
+            self.advance();
+        }
+        if self.at_end() {
+            Err(LexicalError {
+                line: self.line,
+                message: "Unterminated block comment.".to_string(),
+            })
+        } else {
+            // consume the closing "*/"
+            self.advance(); // consume "*"
+            self.advance(); // consume "/"
+
+            // drop comments early,
+            // don't emit a token
+            Ok(None)
+        }
+    }
+
+    fn line_comment(&mut self) -> Result<Option<Token>, LexicalError> {
+        // A line comment goes until the end of the line, so consume those graphemes
+        while self.peek() != "\n" && !self.at_end() {
+            self.advance();
+        }
+        // drop comments early,
+        // don't emit a token
+        Ok(None)
     }
 
     fn string_literal(&mut self) -> Result<Option<Token>, LexicalError> {
@@ -263,7 +307,7 @@ impl<'a> Scanner<'a> {
 
     fn peek(&self) -> &str {
         if self.at_end() {
-            return "\0"; // TODO can probably return ""
+            return "";
         }
         self.graphemes[self.current]
     }
@@ -271,7 +315,7 @@ impl<'a> Scanner<'a> {
     fn peek_next(&self) -> &str {
         let index = self.current + 1;
         if index >= self.graphemes.len() {
-            return "\0"; // TODO can probably return ""
+            return "";
         }
         self.graphemes[index]
     }
@@ -289,7 +333,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn current_lexeme(&self) -> String {
-        self.graphemes[self.start..self.current].iter().join("")
+        self.graphemes[self.start..self.current].join("")
     }
 }
 
@@ -317,6 +361,103 @@ mod tests {
         );
         assert_eq!(scanner.tokens.len(), 1);
         assert_eq!(scanner.tokens.get(0).unwrap().token_type, TokenType::Eof);
+    }
+
+    #[test]
+    fn parse_multiline_comment() {
+        // given
+        let source = "
+            var x = 17
+            /*
+            x = x + 2
+            x = x + 4
+            */
+            print x
+        ";
+        let mut scanner: Scanner = source.into();
+
+        // when
+        scanner.scan_tokens();
+
+        // then
+        assert!(
+            scanner.errors.is_empty(),
+            "Encountered errors: {:?}",
+            scanner.errors
+        );
+        assert_eq!(
+            scanner.tokens.len(),
+            7,
+            "Wrong number of tokens: {:?}",
+            scanner.tokens
+        );
+        assert_eq!(
+            scanner.tokens.get(0).unwrap().token_type,
+            TokenType::Variable
+        );
+        assert_eq!(
+            scanner.tokens.get(1).unwrap().token_type,
+            TokenType::Identifier
+        );
+        assert_eq!(
+            scanner.tokens.get(2).unwrap().token_type,
+            TokenType::Assignment
+        );
+        assert_eq!(
+            scanner.tokens.get(3).unwrap().token_type,
+            TokenType::NumberLiteral
+        );
+        assert_eq!(scanner.tokens.get(4).unwrap().token_type, TokenType::Print);
+        assert_eq!(
+            scanner.tokens.get(5).unwrap().token_type,
+            TokenType::Identifier
+        );
+    }
+
+    #[test]
+    fn unterminated_comment() {
+        // given
+        let source = "var x = 17
+            /*
+            x = x + 2
+            x = x + 4
+            print x";
+        let mut scanner: Scanner = source.into();
+
+        // when
+        scanner.scan_tokens();
+
+        // then
+        assert_eq!(
+            scanner.errors.len(),
+            1,
+            "Expected an error: {:?}",
+            scanner.errors
+        );
+        let error = scanner.errors.get(0).unwrap();
+        assert_eq!(error.line, 5);
+        assert_eq!(
+            scanner.tokens.len(),
+            5,
+            "Wrong number of tokens: {:?}",
+            scanner.tokens
+        );
+        assert_eq!(
+            scanner.tokens.get(0).unwrap().token_type,
+            TokenType::Variable
+        );
+        assert_eq!(
+            scanner.tokens.get(1).unwrap().token_type,
+            TokenType::Identifier
+        );
+        assert_eq!(
+            scanner.tokens.get(2).unwrap().token_type,
+            TokenType::Assignment
+        );
+        assert_eq!(
+            scanner.tokens.get(3).unwrap().token_type,
+            TokenType::NumberLiteral
+        );
     }
 
     #[test]
@@ -466,7 +607,6 @@ mod tests {
         let literal = scanner.tokens.get(3).unwrap();
         assert_eq!(literal.token_type, TokenType::StringLiteral);
         assert_eq!(literal.literal_string, Some("🥧".to_string()));
-        println!("-- literal token: {:?}", literal);
     }
 
     #[test]

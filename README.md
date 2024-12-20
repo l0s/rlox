@@ -4,3 +4,17 @@
 
 A Rust implementation of the Lox language intepreter from [Crafting
 Interpreters](https://craftinginterpreters.com).
+
+## Development
+
+### Accessing the REPL
+
+```
+cargo run
+```
+
+### Executing a file
+
+```
+cargo run file.lox
+```
