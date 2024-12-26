@@ -2,6 +2,7 @@ mod interpreter;
 mod lexical_error;
 mod scanner;
 mod token;
+mod grammar;
 
 use std::env::args;
 use std::io::Write;
