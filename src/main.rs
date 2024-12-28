@@ -1,6 +1,7 @@
 mod grammar;
 mod interpreter;
 mod lexical_error;
+mod parser;
 mod scanner;
 mod token;
 

@@ -60,7 +60,7 @@ pub(crate) enum TokenType {
     Eof,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct Token {
     pub token_type: TokenType,
     pub lexeme: String,
