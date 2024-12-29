@@ -392,11 +392,11 @@ pub(crate) enum EvaluationResult {
 #[cfg(test)]
 mod tests {
     use super::BinaryOperator::{Divide, Equal, LessThan, Multiply};
+    use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
     use super::Expression::{Binary, Grouping, Unary};
     use super::Literal::Nil;
     use super::UnaryOperator::Negative;
-    use crate::grammar::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
-    use crate::grammar::{EvaluationError, EvaluationResult, Expression, Literal};
+    use super::{EvaluationError, EvaluationResult, Expression, Literal};
     use bigdecimal::{BigDecimal, One, Zero};
     use std::str::FromStr;
 

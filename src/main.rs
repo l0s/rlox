@@ -10,8 +10,8 @@ use std::io::Write;
 use std::process::exit;
 use std::{fs, io};
 
-use crate::lexical_error::LexicalError;
-use crate::token::Token;
+use crate::grammar::Expression;
+use crate::interpreter::InterpreterError;
 use interpreter::Interpreter;
 
 fn main() {
@@ -58,17 +58,18 @@ fn prompt(interpreter: &mut Interpreter) {
     }
 }
 
-fn report(result: Result<Vec<Token>, Vec<LexicalError>>) {
+fn report(result: Result<Expression, InterpreterError>) {
     match result {
-        Ok(tokens) => {
-            for token in tokens {
-                println!("{:?}", token);
-            }
+        Ok(expression) => {
+            println!("{:?}", expression);
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("[line {}] Error: {}", error.line, error.message)
+        Err(error) => match error {
+            InterpreterError::Lex(errors) => {
+                for error in errors {
+                    eprintln!("[line {}] Error: {}", error.line, error.message)
+                }
             }
-        }
+            InterpreterError::Parse(parse_error) => eprintln!("{:?}", parse_error),
+        },
     }
 }

@@ -82,6 +82,10 @@ impl TryFrom<Token> for Literal {
 }
 
 impl Parser {
+    pub fn parse(&mut self) -> Result<Expression, ParseError> {
+        self.expression()
+    }
+
     fn expression(&mut self) -> Result<Expression, ParseError> {
         self.equality()
     }
@@ -232,10 +236,10 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    use super::{ParseError, Parser};
     use crate::grammar::Expression::Literal;
     use crate::grammar::Literal::Number;
     use crate::grammar::{BinaryOperator, Expression};
-    use crate::parser::Parser;
     use crate::token::{Token, TokenType};
     use bigdecimal::{BigDecimal, One};
     use std::ops::Deref;
@@ -327,6 +331,28 @@ mod tests {
             }
         } else {
             panic!("Expected binary expression, got: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn handle_unclosed_grouping() {
+        // given
+        let tokens = [
+            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            Token::new_int(6),
+            Token::new(TokenType::ForwardSlash, "/".to_string(), 0),
+            Token::new_int(3),
+        ]
+        .to_vec();
+        let mut parser: Parser = tokens.into();
+
+        // when
+        let result = parser.expression().expect_err("Expected parse error");
+
+        // then
+        match result {
+            ParseError::UnclosedGrouping => {}
+            _ => panic!("Expected unclosed grouping error but got: {:?}", result),
         }
     }
 
