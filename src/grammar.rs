@@ -4,6 +4,41 @@ use std::ops::Neg;
 use std::str::FromStr;
 use EvaluationError::{DivideByZero, NilValue, TypeMismatch};
 
+#[derive(Clone, Debug)]
+pub(crate) struct Program {
+    statements: Vec<Statement>,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub(crate) enum Statement {
+    /// Evaluates expressions that have side effects
+    Expression(Expression),
+
+    /// Evaluates an expression and outputs the result
+    Print(Expression),
+}
+
+#[derive(Debug)]
+pub(crate) enum ExecutionError {
+    Evaluation(EvaluationError),
+}
+
+impl Statement {
+    pub fn execute(&self) -> Result<(), ExecutionError> {
+        match self {
+            Self::Expression(expression) => {
+                expression.evaluate().map_err(ExecutionError::Evaluation)?;
+                Ok(())
+            }
+            Self::Print(value) => {
+                let result = value.evaluate().map_err(ExecutionError::Evaluation)?;
+                println!("{}", result);
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Expression {
     Literal(Literal),
@@ -424,6 +459,17 @@ pub(crate) enum EvaluationResult {
     String(String),
     Boolean(bool),
     Nil,
+}
+
+impl Display for EvaluationResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(value) => value.write_engineering_notation(f),
+            Self::String(value) => f.write_str(value),
+            Self::Boolean(value) => write!(f, "{}", value),
+            Self::Nil => f.write_str("nil"),
+        }
+    }
 }
 
 #[cfg(test)]

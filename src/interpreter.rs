@@ -1,46 +1,45 @@
-use crate::grammar::{EvaluationError, EvaluationResult};
+use crate::grammar::{ExecutionError, Statement};
+use crate::interpreter::InterpreterError::Execution;
 use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
 use crate::scanner::Scanner;
-use InterpreterError::{Evaluation, Lex, Parse};
+use crate::token::Token;
+use InterpreterError::{Lex, Parse};
 
+/// An interpreter takes source code and executes it
 #[derive(Default)]
-pub(crate) struct Interpreter {
-    /// Indicates that a lexing or parsing error occurred
-    pub error: bool,
-    /// Indicates that an evaluation error occurred
-    pub runtime_error: bool,
-}
+pub(crate) struct Interpreter;
 
 pub(crate) enum InterpreterError {
+    /// Errors occurred while tokenizing the input
     Lex(Vec<LexicalError>),
+    /// The tokenized input is nonsensical
     Parse(ParseError),
-    Evaluation(EvaluationError),
+    // Evaluation(EvaluationError),
+    /// A statement could not be executed
+    Execution(ExecutionError),
 }
 
 impl Interpreter {
-    pub fn run(&mut self, source: &str) -> Result<EvaluationResult, InterpreterError> {
-        let mut scanner: Scanner = source.into();
-        scanner.scan_tokens();
-        if !scanner.errors.is_empty() {
-            self.error |= true;
-            Err(Lex(scanner.errors))
-        } else {
-            let mut parser: Parser = scanner.tokens.into();
+    /// Execute a block of Lox source code
+    ///
+    /// Parameters:
+    /// - `source`: Lox source code
+    ///
+    /// Returns:
+    /// - `()`: If all the statements in the source code could be tokenized, parsed, and executed
+    ///         successfully
+    ///- `InterpreterError`: If a lexical, parsing, or execution error occurred
+    pub fn run(&mut self, source: &str) -> Result<(), InterpreterError> {
+        let scanner: Scanner = source.into();
 
-            match parser.parse() {
-                Ok(expression) => match expression.evaluate() {
-                    Ok(result) => Ok(result),
-                    Err(evaluation_error) => {
-                        self.runtime_error |= true;
-                        Err(Evaluation(evaluation_error))
-                    }
-                },
-                Err(parse_error) => {
-                    self.error |= true;
-                    Err(Parse(parse_error))
-                }
-            }
+        let tokens: Vec<Token> = scanner.try_into().map_err(Lex)?;
+        let parser: Parser = tokens.into();
+        let statements: Vec<Statement> = parser.try_into().map_err(Parse)?;
+        for statement in statements {
+            statement.execute().map_err(Execution)?;
         }
+
+        Ok(())
     }
 }

@@ -8,14 +8,15 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::lexical_error::LexicalError;
 use crate::token::{Token, TokenType};
 
+/// A scanner is responsible for tokenizing Lox source code.
 #[derive(Debug)]
 pub(crate) struct Scanner<'a> {
     graphemes: Vec<&'a str>,
-    pub tokens: Vec<Token>,
+    tokens: Vec<Token>,
     start: usize,
     current: usize,
     line: usize,
-    pub errors: Vec<LexicalError>,
+    errors: Vec<LexicalError>,
 }
 
 impl<'a> From<&'a str> for Scanner<'a> {
@@ -27,6 +28,19 @@ impl<'a> From<&'a str> for Scanner<'a> {
             current: 0,
             line: 1,
             errors: vec![],
+        }
+    }
+}
+
+impl TryInto<Vec<Token>> for Scanner<'_> {
+    type Error = Vec<LexicalError>;
+
+    fn try_into(mut self) -> Result<Vec<Token>, Self::Error> {
+        self.scan_tokens();
+        if self.errors.is_empty() {
+            Ok(self.tokens)
+        } else {
+            Err(self.errors)
         }
     }
 }
@@ -51,7 +65,7 @@ static KEYWORDS: phf::Map<&'static str, TokenType> = phf_map! {
 };
 
 impl<'a> Scanner<'a> {
-    pub fn scan_tokens(&mut self) {
+    fn scan_tokens(&mut self) {
         while !self.at_end() {
             // We are at the beginning of the next lexeme
             self.start = self.current;

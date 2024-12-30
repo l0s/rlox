@@ -1,9 +1,10 @@
 use crate::grammar::Expression::{Binary, Unary};
-use crate::grammar::{BinaryOperator, Expression, Literal, UnaryOperator};
+use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken, InvalidUnaryOperator,
-    UnclosedGrouping,
+    UnclosedGrouping, UnterminatedStatement,
 };
+use crate::token::TokenType::Semicolon;
 use crate::token::{Token, TokenType};
 
 #[derive(Debug)]
@@ -28,6 +29,8 @@ pub(crate) enum ParseError {
     InvalidPrimaryToken(Option<TokenType>),
     InvalidLiteral(Token),
     UnclosedGrouping,
+    /// Statement is missing a semicolon
+    UnterminatedStatement,
 }
 
 impl TryFrom<Token> for BinaryOperator {
@@ -81,9 +84,37 @@ impl TryFrom<Token> for Literal {
     }
 }
 
+impl TryInto<Vec<Statement>> for Parser {
+    type Error = ParseError;
+
+    fn try_into(mut self) -> Result<Vec<Statement>, Self::Error> {
+        let mut result = vec![];
+        while !self.at_end() {
+            result.push(self.statement()?);
+        }
+        Ok(result)
+    }
+}
+
 impl Parser {
-    pub fn parse(&mut self) -> Result<Expression, ParseError> {
-        self.expression()
+    fn statement(&mut self) -> Result<Statement, ParseError> {
+        if self.token_match(&[TokenType::Print]) {
+            self.print_statement()
+        } else {
+            self.expression_statement()
+        }
+    }
+
+    fn print_statement(&mut self) -> Result<Statement, ParseError> {
+        let value = self.expression()?;
+        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated expression
+        Ok(Statement::Print(value))
+    }
+
+    fn expression_statement(&mut self) -> Result<Statement, ParseError> {
+        let expression = self.expression()?;
+        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        Ok(Statement::Expression(expression))
     }
 
     fn expression(&mut self) -> Result<Expression, ParseError> {
