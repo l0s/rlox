@@ -36,9 +36,9 @@ impl Expression {
             Self::Unary(operator, expression) => operator.result_type(expression.result_type()),
             Self::Binary {
                 operator,
-                left_value: _left_value,
-                right_value: _right_value,
-            } => Some(operator.result_type()),
+                left_value,
+                right_value,
+            } => Some(operator.result_type(&left_value.result_type(), &right_value.result_type())),
             Self::Grouping(expression) => expression.result_type(),
         }
     }
@@ -273,14 +273,28 @@ impl BinaryOperator {
 
     pub fn evaluate_string(
         &self,
-        _left_value: &Expression,
-        _right_value: &Expression,
+        left_value: &Expression,
+        right_value: &Expression,
     ) -> Result<String, EvaluationError> {
-        // none of the binary operators produce string results
+        if self == &Self::Add
+            && left_value.result_type() == Some(DataType::String)
+            && right_value.result_type() == Some(DataType::String)
+        {
+            return Ok(format!(
+                "{}{}",
+                left_value.evaluate_string()?,
+                right_value.evaluate_string()?
+            ));
+        }
+        // none of the other binary operators produce string results
         Err(TypeMismatch)
     }
 
-    pub fn result_type(&self) -> DataType {
+    pub fn result_type(
+        &self,
+        left_value_type: &Option<DataType>,
+        right_value_type: &Option<DataType>,
+    ) -> DataType {
         match self {
             Self::Equal => DataType::Boolean,
             Self::NotEqual => DataType::Boolean,
@@ -288,7 +302,17 @@ impl BinaryOperator {
             Self::GreaterThan => DataType::Boolean,
             Self::LessThanOrEqual => DataType::Boolean,
             Self::GreaterThanOrEqual => DataType::Boolean,
-            Self::Add => DataType::Number,
+            Self::Add => {
+                if *left_value_type == Some(DataType::String)
+                    && *right_value_type == Some(DataType::String)
+                {
+                    // TODO should we allow concatenating a string to Nil?
+                    // TODO should we allow concatenating a string and a number?
+                    DataType::String
+                } else {
+                    DataType::Number
+                }
+            }
             Self::Subtract => DataType::Number,
             Self::Multiply => DataType::Number,
             Self::Divide => DataType::Number,
@@ -391,29 +415,27 @@ pub(crate) enum EvaluationResult {
 
 #[cfg(test)]
 mod tests {
-    use super::BinaryOperator::{Divide, Equal, LessThan, Multiply};
+    use super::BinaryOperator::{Add, Divide, Equal, LessThan, Multiply};
     use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
-    use super::Expression::{Binary, Grouping, Unary};
     use super::Literal::Nil;
-    use super::UnaryOperator::Negative;
-    use super::{EvaluationError, EvaluationResult, Expression, Literal};
+    use super::{EvaluationError, EvaluationResult, Expression, Literal, UnaryOperator};
     use bigdecimal::{BigDecimal, One, Zero};
     use std::str::FromStr;
 
     #[test]
     fn ast_prefix_printer() {
         // given
-        let ast = Binary {
+        let ast = Expression::Binary {
             operator: Multiply,
-            left_value: Box::new(Unary(
-                Negative,
+            left_value: Box::new(Expression::Unary(
+                UnaryOperator::Negative,
                 Box::new(Expression::Literal(Literal::Number(
                     BigDecimal::from_str("123").unwrap(),
                 ))),
             )),
-            right_value: Box::new(Grouping(Box::new(Expression::Literal(Literal::Number(
-                BigDecimal::from_str("45.67").unwrap(),
-            ))))),
+            right_value: Box::new(Expression::Grouping(Box::new(Expression::Literal(
+                Literal::Number(BigDecimal::from_str("45.67").unwrap()),
+            )))),
         };
 
         // when
@@ -465,7 +487,7 @@ mod tests {
         number_literal: (Expression::Literal(Literal::Number(BigDecimal::from_str("2.718281828").unwrap())), EvaluationResult::Number(BigDecimal::from_str("2.718281828").unwrap())),
         string_literal: (Expression::Literal(Literal::String("🎄".to_string())), EvaluationResult::String("🎄".to_string())),
         pi_less_than_tau: (
-            Binary {
+            Expression::Binary {
                 operator: LessThan,
                 left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
                 right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("6.283185307179586").unwrap()))),
@@ -473,12 +495,20 @@ mod tests {
             EvaluationResult::Boolean(true),
         ),
         string_not_equal_to_number: (
-            Binary {
+            Expression::Binary {
                 operator: Equal,
                 left_value: Box::new(Expression::Literal(Literal::String("🥧".to_string()))),
                 right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
             },
             EvaluationResult::Boolean(false),
+        ),
+        string_concatenation: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(Expression::Literal(Literal::String("😒".to_string()))),
+                right_value: Box::new(Expression::Literal(Literal::String("😥".to_string()))),
+            },
+            EvaluationResult::String("😒😥".to_string()),
         ),
     }
 
@@ -496,7 +526,7 @@ mod tests {
 
     unsuccessful_evaluation_tests! {
         divide_by_zero: (
-            Binary {
+            Expression::Binary {
                 operator: Divide,
                 left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::one()))),
                 right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::zero()))),
@@ -504,7 +534,7 @@ mod tests {
             DivideByZero,
         ),
         unexpected_nil: (
-            Binary {
+            Expression::Binary {
                 operator: Multiply,
                 left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::one()))),
                 right_value: Box::new(Expression::Literal(Nil)),
@@ -512,10 +542,22 @@ mod tests {
             NilValue,
         ),
         type_mismatch: (
-            Binary {
+            Expression::Binary {
                 operator: LessThan,
                 left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
                 right_value: Box::new(Expression::Literal(Literal::String("🥧".to_string()))),
+            },
+            TypeMismatch,
+        ),
+        cannot_negate_cupcake: (
+            Expression::Binary {
+                operator: Multiply,
+                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("2").unwrap()))),
+                right_value: Box::new(Expression::Grouping(Box::new(Expression::Binary {
+                    operator: Divide,
+                    left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3").unwrap()))),
+                    right_value: Box::new(Expression::Unary(UnaryOperator::Negative, Box::new(Expression::Literal(Literal::String("🧁".to_string()))))),
+                })))
             },
             TypeMismatch,
         ),

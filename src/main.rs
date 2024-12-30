@@ -10,7 +10,7 @@ use std::io::Write;
 use std::process::exit;
 use std::{fs, io};
 
-use crate::grammar::Expression;
+use crate::grammar::EvaluationResult;
 use crate::interpreter::InterpreterError;
 use interpreter::Interpreter;
 
@@ -26,9 +26,14 @@ fn main() {
         } else {
             prompt(&mut interpreter);
         }
-        if interpreter.error {
-            exit(65);
-        }
+        let exit_code = if interpreter.error {
+            65
+        } else if interpreter.runtime_error {
+            70
+        } else {
+            0
+        };
+        exit(exit_code);
     }
 }
 
@@ -58,7 +63,7 @@ fn prompt(interpreter: &mut Interpreter) {
     }
 }
 
-fn report(result: Result<Expression, InterpreterError>) {
+fn report(result: Result<EvaluationResult, InterpreterError>) {
     match result {
         Ok(expression) => {
             println!("{:?}", expression);
@@ -69,7 +74,10 @@ fn report(result: Result<Expression, InterpreterError>) {
                     eprintln!("[line {}] Error: {}", error.line, error.message)
                 }
             }
-            InterpreterError::Parse(parse_error) => eprintln!("{:?}", parse_error),
+            InterpreterError::Parse(parse_error) => eprintln!("Parse error: {:?}", parse_error),
+            InterpreterError::Evaluation(evaluation_error) => {
+                eprintln!("Evaluation error: {:?}", evaluation_error)
+            }
         },
     }
 }
