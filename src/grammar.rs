@@ -273,15 +273,30 @@ impl BinaryOperator {
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<String, EvaluationError> {
-        if self == &Self::Add
-            && left_value.result_type() == Some(DataType::String)
-            && right_value.result_type() == Some(DataType::String)
-        {
-            return Ok(format!(
-                "{}{}",
-                left_value.evaluate_string()?,
-                right_value.evaluate_string()?
-            ));
+        if self == &Self::Add {
+            let left_type = left_value.result_type();
+            let right_type = right_value.result_type();
+            if left_type == Some(DataType::String) || right_type == Some(DataType::String) {
+                fn convert_to_string(
+                    expression: &Expression,
+                    data_type: Option<DataType>,
+                ) -> Result<String, EvaluationError> {
+                    Ok(match data_type {
+                        None => "".to_string(),
+                        Some(value) => match value {
+                            DataType::Number => expression.evaluate_number()?.to_string(),
+                            DataType::String => expression.evaluate_string()?,
+                            DataType::Boolean => expression.evaluate_boolean()?.to_string(),
+                        },
+                    })
+                }
+
+                let left_string = convert_to_string(left_value, left_type)?;
+                let right_string = convert_to_string(right_value, right_type)?;
+                return Ok(format!("{}{}", left_string, right_string));
+            } else if left_type.is_none() && right_type.is_none() {
+                return Err(NilValue);
+            }
         }
         // none of the other binary operators produce string results
         Err(TypeMismatch)
@@ -301,10 +316,8 @@ impl BinaryOperator {
             Self::GreaterThanOrEqual => DataType::Boolean,
             Self::Add => {
                 if *left_value_type == Some(DataType::String)
-                    && *right_value_type == Some(DataType::String)
+                    || *right_value_type == Some(DataType::String)
                 {
-                    // TODO should we allow concatenating a string to Nil?
-                    // TODO should we allow concatenating a string and a number?
                     DataType::String
                 } else {
                     DataType::Number
@@ -526,6 +539,22 @@ mod tests {
             Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::String("🥯".to_string())))),
             EvaluationResult::Boolean(false),
         ),
+        concatenate_string_and_number: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(Expression::Literal(Literal::String("🥐".to_string()))),
+                right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from(4)))),
+            },
+            EvaluationResult::String("🥐4".to_string()),
+        ),
+        concatenate_nil_and_string: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(Expression::Literal(Nil)),
+                right_value: Box::new(Expression::Literal(Literal::String("🥐".to_string()))),
+            },
+            EvaluationResult::String("🥐".to_string()),
+        ),
     }
 
     macro_rules! unsuccessful_evaluation_tests {
@@ -576,6 +605,14 @@ mod tests {
                 })))
             },
             TypeMismatch,
+        ),
+        cannot_concatenate_nils: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(Expression::Literal(Nil)),
+                right_value: Box::new(Expression::Literal(Nil)),
+            },
+            NilValue,
         ),
     }
 }
