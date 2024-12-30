@@ -46,11 +46,8 @@ impl Expression {
     pub fn evaluate_boolean(&self) -> Result<bool, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
-                Literal::Number(_) => Err(TypeMismatch),
-                Literal::String(_) => Err(TypeMismatch),
-                Literal::True => Ok(true),
-                Literal::False => Ok(false),
-                Literal::Nil => Err(NilValue),
+                Literal::False | Literal::Nil => Ok(false),
+                _ => Ok(true),
             },
             Self::Unary(operator, argument) => {
                 if *operator == UnaryOperator::Not {
@@ -344,8 +341,11 @@ pub(crate) enum UnaryOperator {
 }
 
 impl UnaryOperator {
-    pub fn result_type(&self, input_type: Option<DataType>) -> Option<DataType> {
-        input_type
+    pub fn result_type(&self, _input_type: Option<DataType>) -> Option<DataType> {
+        match self {
+            UnaryOperator::Negative => Some(DataType::Number),
+            UnaryOperator::Not => Some(DataType::Boolean),
+        }
     }
 }
 
@@ -509,6 +509,22 @@ mod tests {
                 right_value: Box::new(Expression::Literal(Literal::String("😥".to_string()))),
             },
             EvaluationResult::String("😒😥".to_string()),
+        ),
+        nil_is_falsey: (
+            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Nil))),
+            EvaluationResult::Boolean(true),
+        ),
+        zero_is_truthy: (
+            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::Number(BigDecimal::zero())))),
+            EvaluationResult::Boolean(false),
+        ),
+        one_is_truthy: (
+            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::Number(BigDecimal::one())))),
+            EvaluationResult::Boolean(false),
+        ),
+        string_is_truthy: (
+            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::String("🥯".to_string())))),
+            EvaluationResult::Boolean(false),
         ),
     }
 
