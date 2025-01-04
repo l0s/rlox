@@ -2,7 +2,7 @@ use crate::grammar::Expression::{Binary, Unary};
 use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken, InvalidUnaryOperator,
-    UnclosedGrouping, UnterminatedStatement,
+    UnclosedGrouping, UnterminatedStatement, VariableNameExpected,
 };
 use crate::token::TokenType::Semicolon;
 use crate::token::{Token, TokenType};
@@ -31,6 +31,7 @@ pub(crate) enum ParseError {
     UnclosedGrouping,
     /// Statement is missing a semicolon
     UnterminatedStatement,
+    VariableNameExpected,
 }
 
 impl TryFrom<Token> for BinaryOperator {
@@ -90,13 +91,43 @@ impl TryInto<Vec<Statement>> for Parser {
     fn try_into(mut self) -> Result<Vec<Statement>, Self::Error> {
         let mut result = vec![];
         while !self.at_end() {
-            result.push(self.statement()?);
+            if let Some(declaration) = self.declaration()? {
+                result.push(declaration);
+            }
         }
         Ok(result)
     }
 }
 
 impl Parser {
+    fn declaration(&mut self) -> Result<Option<Statement>, ParseError> {
+        if self.token_match(&[TokenType::Variable]) {
+            return self.variable_declaration().map(Some);
+        }
+        match self.statement() {
+            Ok(statement) => Ok(Some(statement)),
+            Err(_) => {
+                self.synchronize();
+                Ok(None) // TODO how do we communicate the parse error?
+            }
+        }
+    }
+
+    fn variable_declaration(&mut self) -> Result<Statement, ParseError> {
+        let name_token = self.consume(&TokenType::Identifier, VariableNameExpected)?;
+        let identifier = name_token.lexeme.clone();
+        let expression = if self.token_match(&[TokenType::Assignment]) {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        Ok(Statement::Variable {
+            identifier,
+            expression,
+        })
+    }
+
     fn statement(&mut self) -> Result<Statement, ParseError> {
         if self.token_match(&[TokenType::Print]) {
             self.print_statement()
@@ -205,6 +236,8 @@ impl Parser {
             let expression = self.expression()?;
             self.consume(&TokenType::CloseParenthesis, UnclosedGrouping)?;
             Ok(Expression::Grouping(Box::new(expression)))
+        } else if self.token_match(&[TokenType::Identifier]) {
+            Ok(Expression::Variable(self.previous().lexeme.clone()))
         } else {
             Err(InvalidPrimaryToken(
                 self.peek().map(|token| token.token_type),
@@ -262,6 +295,32 @@ impl Parser {
 
     fn previous(&self) -> &Token {
         &self.tokens[self.current - 1]
+    }
+
+    /// In case of a parsing error, advance to a statement boundary to resume parsing
+    fn synchronize(&mut self) {
+        self.advance();
+        while !self.at_end() {
+            if self.previous().token_type == Semicolon {
+                return;
+            }
+
+            if let Some(token) = self.peek() {
+                match token.token_type {
+                    TokenType::Class
+                    | TokenType::Function
+                    | TokenType::Variable
+                    | TokenType::For
+                    | TokenType::If
+                    | TokenType::While
+                    | TokenType::Print
+                    | TokenType::Return => return,
+                    _ => {}
+                }
+            }
+
+            self.advance();
+        }
     }
 }
 

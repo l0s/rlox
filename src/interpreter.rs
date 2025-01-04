@@ -1,14 +1,27 @@
+use crate::environment::Environment;
 use crate::grammar::{ExecutionError, Statement};
 use crate::interpreter::InterpreterError::Execution;
 use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
 use crate::scanner::Scanner;
+use crate::side_effects::{SideEffects, StandardSideEffects};
 use crate::token::Token;
 use InterpreterError::{Lex, Parse};
 
 /// An interpreter takes source code and executes it
-#[derive(Default)]
-pub(crate) struct Interpreter;
+pub(crate) struct Interpreter<S: SideEffects> {
+    environment: Environment,
+    side_effects: S,
+}
+
+impl Default for Interpreter<StandardSideEffects> {
+    fn default() -> Self {
+        Self {
+            environment: Default::default(),
+            side_effects: Default::default(),
+        }
+    }
+}
 
 pub(crate) enum InterpreterError {
     /// Errors occurred while tokenizing the input
@@ -20,7 +33,7 @@ pub(crate) enum InterpreterError {
     Execution(ExecutionError),
 }
 
-impl Interpreter {
+impl<S: SideEffects> Interpreter<S> {
     /// Execute a block of Lox source code
     ///
     /// Parameters:
@@ -37,7 +50,9 @@ impl Interpreter {
         let parser: Parser = tokens.into();
         let statements: Vec<Statement> = parser.try_into().map_err(Parse)?;
         for statement in statements {
-            statement.execute().map_err(Execution)?;
+            statement
+                .execute(&mut self.environment, &mut self.side_effects)
+                .map_err(Execution)?;
         }
 
         Ok(())

@@ -1,3 +1,6 @@
+use crate::environment::Environment;
+use crate::grammar::EvaluationError::Undefined;
+use crate::side_effects::SideEffects;
 use bigdecimal::{BigDecimal, Zero};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Neg;
@@ -9,6 +12,7 @@ pub(crate) struct Program {
     statements: Vec<Statement>,
 }
 
+/// A statement is an instruction that produces a side effect
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum Statement {
     /// Evaluates expressions that have side effects
@@ -16,29 +20,61 @@ pub(crate) enum Statement {
 
     /// Evaluates an expression and outputs the result
     Print(Expression),
+
+    /// A variable declaration with optional definition
+    Variable {
+        identifier: String,
+        /// If None, this is a variable declaration without assignment
+        expression: Option<Expression>,
+    },
 }
 
-#[derive(Debug)]
+#[derive(Eq, PartialEq, Debug)]
 pub(crate) enum ExecutionError {
     Evaluation(EvaluationError),
 }
 
 impl Statement {
-    pub fn execute(&self) -> Result<(), ExecutionError> {
+    pub fn execute<S: SideEffects>(
+        &self,
+        environment: &mut Environment,
+        side_effects: &mut S,
+    ) -> Result<(), ExecutionError> {
         match self {
             Self::Expression(expression) => {
-                expression.evaluate().map_err(ExecutionError::Evaluation)?;
+                expression
+                    .evaluate(environment)
+                    .map_err(ExecutionError::Evaluation)?;
                 Ok(())
             }
             Self::Print(value) => {
-                let result = value.evaluate().map_err(ExecutionError::Evaluation)?;
-                println!("{}", result);
+                let result = value
+                    .evaluate(environment)
+                    .map_err(ExecutionError::Evaluation)?;
+
+                side_effects.println(&format!("{}", result));
+
+                Ok(())
+            }
+            Self::Variable {
+                identifier,
+                expression,
+            } => {
+                let result = expression
+                    .clone() // TODO can we avoid cloning?
+                    .map(|e| e.evaluate(environment))
+                    .unwrap_or(Ok(EvaluationResult::Nil))
+                    .map_err(ExecutionError::Evaluation)?;
+
+                environment.define(identifier.clone(), result);
+
                 Ok(())
             }
         }
     }
 }
 
+/// An expression evaluates to a value and produces no side effects.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Expression {
     Literal(Literal),
@@ -49,36 +85,65 @@ pub(crate) enum Expression {
         right_value: Box<Expression>,
     },
     Grouping(Box<Expression>),
+    /// A reference to a variable's value
+    Variable(String),
+}
+
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub(crate) enum ResultType {
+    /// The expression will be non-nil and has a result type
+    Some(DataType),
+    /// The expression will evaluate to Nil and therefore has no result type
+    None,
+    /// No result type can be determined because the expression refers to an undefined variable
+    Undefined,
+}
+
+impl ResultType {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
 }
 
 impl Expression {
-    pub fn evaluate(&self) -> Result<EvaluationResult, EvaluationError> {
-        match self.result_type() {
-            None => Ok(EvaluationResult::Nil),
-            Some(data_type) => data_type.evaluate(self),
+    pub fn evaluate(&self, environment: &Environment) -> Result<EvaluationResult, EvaluationError> {
+        match self.result_type(environment) {
+            ResultType::None => Ok(EvaluationResult::Nil),
+            ResultType::Some(data_type) => data_type.evaluate(self, environment),
+            ResultType::Undefined => Err(Undefined),
         }
     }
 
-    pub fn result_type(&self) -> Option<DataType> {
+    pub fn result_type(&self, environment: &Environment) -> ResultType {
         match self {
             Self::Literal(literal) => match literal {
-                Literal::Number(_) => Some(DataType::Number),
-                Literal::String(_) => Some(DataType::String),
-                Literal::True => Some(DataType::Boolean),
-                Literal::False => Some(DataType::Boolean),
-                Literal::Nil => None,
+                Literal::Number(_) => ResultType::Some(DataType::Number),
+                Literal::String(_) => ResultType::Some(DataType::String),
+                Literal::True | Literal::False => ResultType::Some(DataType::Boolean),
+                Literal::Nil => ResultType::None,
             },
-            Self::Unary(operator, expression) => operator.result_type(expression.result_type()),
+            Self::Unary(operator, expression) => operator.result_type(environment, expression),
             Self::Binary {
                 operator,
                 left_value,
                 right_value,
-            } => Some(operator.result_type(&left_value.result_type(), &right_value.result_type())),
-            Self::Grouping(expression) => expression.result_type(),
+            } => operator.result_type(environment, left_value, right_value),
+            Self::Grouping(expression) => expression.result_type(environment),
+            Self::Variable(name) => {
+                if let Some(value) = environment.get(name) {
+                    if let Some(data_type) = value.data_type() {
+                        ResultType::Some(data_type)
+                    } else {
+                        ResultType::None
+                    }
+                } else {
+                    ResultType::Undefined
+                }
+            }
         }
     }
 
-    pub fn evaluate_boolean(&self) -> Result<bool, EvaluationError> {
+    pub fn evaluate_boolean(&self, environment: &Environment) -> Result<bool, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
                 Literal::False | Literal::Nil => Ok(false),
@@ -86,7 +151,7 @@ impl Expression {
             },
             Self::Unary(operator, argument) => {
                 if *operator == UnaryOperator::Not {
-                    argument.evaluate_boolean().map(|result| !result)
+                    argument.evaluate_boolean(environment).map(|result| !result)
                 } else {
                     Err(TypeMismatch)
                 }
@@ -95,12 +160,26 @@ impl Expression {
                 operator,
                 left_value,
                 right_value,
-            } => operator.evaluate_boolean(left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_boolean(),
+            } => operator.evaluate_boolean(environment, left_value, right_value),
+            Self::Grouping(expression) => expression.evaluate_boolean(environment),
+            Self::Variable(name) => {
+                if let Some(value) = environment.get(name) {
+                    match value {
+                        EvaluationResult::Number(_) | EvaluationResult::String(_) => Ok(true),
+                        EvaluationResult::Boolean(value) => Ok(*value),
+                        EvaluationResult::Nil => Ok(false),
+                    }
+                } else {
+                    Ok(false)
+                }
+            }
         }
     }
 
-    pub fn evaluate_number(&self) -> Result<BigDecimal, EvaluationError> {
+    pub fn evaluate_number(
+        &self,
+        environment: &Environment,
+    ) -> Result<BigDecimal, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
                 Literal::Number(number) => Ok(number.clone()),
@@ -109,7 +188,7 @@ impl Expression {
             },
             Self::Unary(operator, argument) => {
                 if *operator == UnaryOperator::Negative {
-                    argument.evaluate_number().map(BigDecimal::neg)
+                    argument.evaluate_number(environment).map(BigDecimal::neg)
                 } else {
                     Err(TypeMismatch)
                 }
@@ -118,12 +197,23 @@ impl Expression {
                 operator,
                 left_value,
                 right_value,
-            } => operator.evaluate_number(left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_number(),
+            } => operator.evaluate_number(environment, left_value, right_value),
+            Self::Grouping(expression) => expression.evaluate_number(environment),
+            Self::Variable(name) => {
+                if let Some(value) = environment.get(name) {
+                    if let EvaluationResult::Number(value) = value {
+                        Ok(value.clone())
+                    } else {
+                        Err(TypeMismatch)
+                    }
+                } else {
+                    Err(NilValue)
+                }
+            }
         }
     }
 
-    pub fn evaluate_string(&self) -> Result<String, EvaluationError> {
+    pub fn evaluate_string(&self, environment: &Environment) -> Result<String, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
                 Literal::String(value) => Ok(value.clone()),
@@ -135,8 +225,19 @@ impl Expression {
                 operator,
                 left_value,
                 right_value,
-            } => operator.evaluate_string(left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_string(),
+            } => operator.evaluate_string(environment, left_value, right_value),
+            Self::Grouping(expression) => expression.evaluate_string(environment),
+            Self::Variable(name) => {
+                if let Some(value) = environment.get(name) {
+                    if let EvaluationResult::String(value) = value {
+                        Ok(value.clone())
+                    } else {
+                        Err(TypeMismatch)
+                    }
+                } else {
+                    Err(NilValue)
+                }
+            }
         }
     }
 }
@@ -152,8 +253,8 @@ impl Debug for Expression {
                 Literal::Nil => f.write_str("nil"),
             },
             Self::Unary(operator, expression) => match operator {
-                UnaryOperator::Negative => f.write_fmt(format_args!("(- {:?})", expression)),
-                UnaryOperator::Not => f.write_fmt(format_args!("(! {:?})", expression)),
+                UnaryOperator::Negative => write!(f, "(- {:?})", expression),
+                UnaryOperator::Not => write!(f, "(! {:?})", expression),
             },
             Self::Binary {
                 operator,
@@ -172,12 +273,10 @@ impl Debug for Expression {
                     BinaryOperator::Multiply => "*",
                     BinaryOperator::Divide => "/",
                 };
-                f.write_fmt(format_args!(
-                    "({} {:?} {:?})",
-                    symbol, left_value, right_value
-                ))
+                write!(f, "({} {:?} {:?})", symbol, left_value, right_value)
             }
-            Self::Grouping(expression) => f.write_fmt(format_args!("(group {:?})", expression)),
+            Self::Grouping(expression) => write!(f, "(group {:?})", expression),
+            Self::Variable(name) => write!(f, "(var {})", name),
         }
     }
 }
@@ -187,6 +286,8 @@ pub enum EvaluationError {
     TypeMismatch,
     NilValue,
     DivideByZero,
+    /// The expression refers to an undefined variable
+    Undefined,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -206,76 +307,111 @@ pub(crate) enum BinaryOperator {
 impl BinaryOperator {
     pub fn evaluate_boolean(
         &self,
+        environment: &Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<bool, EvaluationError> {
         match self {
             Self::Equal => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, None) => Ok(true),
-                    (None, Some(_)) | (Some(_), None) => Ok(false),
-                    (Some(DataType::String), Some(DataType::String)) => {
-                        Ok(left_value.evaluate_string()? == right_value.evaluate_string()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, ResultType::None) => Ok(true),
+                    (ResultType::None, ResultType::Some(_))
+                    | (ResultType::Some(_), ResultType::None) => Ok(false),
+                    (ResultType::Some(DataType::String), ResultType::Some(DataType::String)) => {
+                        Ok(left_value.evaluate_string(environment)?
+                            == right_value.evaluate_string(environment)?)
                     }
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? == right_value.evaluate_number()?)
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            == right_value.evaluate_number(environment)?)
                     }
-                    (Some(DataType::Boolean), Some(DataType::Boolean)) => {
-                        Ok(left_value.evaluate_boolean()? == right_value.evaluate_boolean()?)
+                    (ResultType::Some(DataType::Boolean), ResultType::Some(DataType::Boolean)) => {
+                        Ok(left_value.evaluate_boolean(environment)?
+                            == right_value.evaluate_boolean(environment)?)
                     }
                     _ => Ok(false), // two different types, cannot be equal to each other
                 }
             }
             Self::NotEqual => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, None) => Ok(false),
-                    (None, Some(_)) | (Some(_), None) => Ok(true),
-                    (Some(DataType::String), Some(DataType::String)) => {
-                        Ok(left_value.evaluate_string()? != right_value.evaluate_string()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, ResultType::None) => Ok(false),
+                    (ResultType::None, ResultType::Some(_))
+                    | (ResultType::Some(_), ResultType::None) => Ok(true),
+                    (ResultType::Some(DataType::String), ResultType::Some(DataType::String)) => {
+                        Ok(left_value.evaluate_string(environment)?
+                            != right_value.evaluate_string(environment)?)
                     }
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? != right_value.evaluate_number()?)
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            != right_value.evaluate_number(environment)?)
                     }
-                    (Some(DataType::Boolean), Some(DataType::Boolean)) => {
-                        Ok(left_value.evaluate_boolean()? != right_value.evaluate_boolean()?)
+                    (ResultType::Some(DataType::Boolean), ResultType::Some(DataType::Boolean)) => {
+                        Ok(left_value.evaluate_boolean(environment)?
+                            != right_value.evaluate_boolean(environment)?)
                     }
                     _ => Ok(true), // two different types, cannot be equal to each other
                 }
             }
             Self::LessThan => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, _) | (_, None) => Err(NilValue),
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? < right_value.evaluate_number()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            < right_value.evaluate_number(environment)?)
                     }
-                    (Some(_), Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
                 }
             }
             Self::GreaterThan => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, _) | (_, None) => Err(NilValue),
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? > right_value.evaluate_number()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            > right_value.evaluate_number(environment)?)
                     }
-                    (Some(_), Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
                 }
             }
             Self::LessThanOrEqual => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, _) | (_, None) => Err(NilValue),
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? <= right_value.evaluate_number()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            <= right_value.evaluate_number(environment)?)
                     }
-                    (Some(_), Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
                 }
             }
             Self::GreaterThanOrEqual => {
-                match (left_value.result_type(), right_value.result_type()) {
-                    (None, _) | (_, None) => Err(NilValue),
-                    (Some(DataType::Number), Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number()? >= right_value.evaluate_number()?)
+                match (
+                    left_value.result_type(environment),
+                    right_value.result_type(environment),
+                ) {
+                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
+                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                        Ok(left_value.evaluate_number(environment)?
+                            >= right_value.evaluate_number(environment)?)
                     }
-                    (Some(_), Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
+                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
                 }
             }
             _ => Err(TypeMismatch),
@@ -284,19 +420,23 @@ impl BinaryOperator {
 
     pub fn evaluate_number(
         &self,
+        environment: &Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<BigDecimal, EvaluationError> {
         match self {
-            Self::Add => Ok(left_value.evaluate_number()? + right_value.evaluate_number()?),
-            Self::Subtract => Ok(left_value.evaluate_number()? - right_value.evaluate_number()?),
-            Self::Multiply => Ok(left_value.evaluate_number()? * right_value.evaluate_number()?),
+            Self::Add => Ok(left_value.evaluate_number(environment)?
+                + right_value.evaluate_number(environment)?),
+            Self::Subtract => Ok(left_value.evaluate_number(environment)?
+                - right_value.evaluate_number(environment)?),
+            Self::Multiply => Ok(left_value.evaluate_number(environment)?
+                * right_value.evaluate_number(environment)?),
             Self::Divide => {
-                let right_value = right_value.evaluate_number()?;
+                let right_value = right_value.evaluate_number(environment)?;
                 if right_value.is_zero() {
                     Err(DivideByZero)
                 } else {
-                    Ok(left_value.evaluate_number()? / right_value)
+                    Ok(left_value.evaluate_number(environment)? / right_value)
                 }
             }
             _ => Err(TypeMismatch),
@@ -305,26 +445,33 @@ impl BinaryOperator {
 
     pub fn evaluate_string(
         &self,
+        environment: &Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<String, EvaluationError> {
         if self == &Self::Add {
-            let left_type = left_value.result_type();
-            let right_type = right_value.result_type();
-            if left_type == Some(DataType::String) || right_type == Some(DataType::String) {
-                fn convert_to_string(
-                    expression: &Expression,
-                    data_type: Option<DataType>,
-                ) -> Result<String, EvaluationError> {
+            let left_type = left_value.result_type(environment);
+            let right_type = right_value.result_type(environment);
+            if left_type == ResultType::Some(DataType::String)
+                || right_type == ResultType::Some(DataType::String)
+            {
+                let convert_to_string = |expression: &Expression,
+                                         data_type: ResultType|
+                 -> Result<String, EvaluationError> {
                     Ok(match data_type {
-                        None => "".to_string(),
-                        Some(value) => match value {
-                            DataType::Number => expression.evaluate_number()?.to_string(),
-                            DataType::String => expression.evaluate_string()?,
-                            DataType::Boolean => expression.evaluate_boolean()?.to_string(),
+                        ResultType::None => "".to_string(),
+                        ResultType::Some(value) => match value {
+                            DataType::Number => {
+                                expression.evaluate_number(environment)?.to_string()
+                            }
+                            DataType::String => expression.evaluate_string(environment)?,
+                            DataType::Boolean => {
+                                expression.evaluate_boolean(environment)?.to_string()
+                            }
                         },
+                        ResultType::Undefined => Err(Undefined)?,
                     })
-                }
+                };
 
                 let left_string = convert_to_string(left_value, left_type)?;
                 let right_string = convert_to_string(right_value, right_type)?;
@@ -339,28 +486,29 @@ impl BinaryOperator {
 
     pub fn result_type(
         &self,
-        left_value_type: &Option<DataType>,
-        right_value_type: &Option<DataType>,
-    ) -> DataType {
+        environment: &Environment,
+        left_value: &Expression,
+        right_value: &Expression,
+    ) -> ResultType {
         match self {
-            Self::Equal => DataType::Boolean,
-            Self::NotEqual => DataType::Boolean,
-            Self::LessThan => DataType::Boolean,
-            Self::GreaterThan => DataType::Boolean,
-            Self::LessThanOrEqual => DataType::Boolean,
-            Self::GreaterThanOrEqual => DataType::Boolean,
+            Self::Equal => ResultType::Some(DataType::Boolean),
+            Self::NotEqual => ResultType::Some(DataType::Boolean),
+            Self::LessThan => ResultType::Some(DataType::Boolean),
+            Self::GreaterThan => ResultType::Some(DataType::Boolean),
+            Self::LessThanOrEqual => ResultType::Some(DataType::Boolean),
+            Self::GreaterThanOrEqual => ResultType::Some(DataType::Boolean),
             Self::Add => {
-                if *left_value_type == Some(DataType::String)
-                    || *right_value_type == Some(DataType::String)
+                if (*left_value).result_type(environment) == ResultType::Some(DataType::String)
+                    || (*right_value).result_type(environment) == ResultType::Some(DataType::String)
                 {
-                    DataType::String
+                    ResultType::Some(DataType::String)
                 } else {
-                    DataType::Number
+                    ResultType::Some(DataType::Number)
                 }
             }
-            Self::Subtract => DataType::Number,
-            Self::Multiply => DataType::Number,
-            Self::Divide => DataType::Number,
+            Self::Subtract => ResultType::Some(DataType::Number),
+            Self::Multiply => ResultType::Some(DataType::Number),
+            Self::Divide => ResultType::Some(DataType::Number),
         }
     }
 }
@@ -389,10 +537,10 @@ pub(crate) enum UnaryOperator {
 }
 
 impl UnaryOperator {
-    pub fn result_type(&self, _input_type: Option<DataType>) -> Option<DataType> {
+    pub fn result_type(&self, _environment: &Environment, _input: &Expression) -> ResultType {
         match self {
-            UnaryOperator::Negative => Some(DataType::Number),
-            UnaryOperator::Not => Some(DataType::Boolean),
+            UnaryOperator::Negative => ResultType::Some(DataType::Number),
+            UnaryOperator::Not => ResultType::Some(DataType::Boolean),
         }
     }
 }
@@ -444,11 +592,21 @@ pub(crate) enum DataType {
 }
 
 impl DataType {
-    pub fn evaluate(&self, expression: &Expression) -> Result<EvaluationResult, EvaluationError> {
+    pub fn evaluate(
+        &self,
+        expression: &Expression,
+        environment: &Environment,
+    ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            Self::Number => Ok(EvaluationResult::Number(expression.evaluate_number()?)),
-            Self::String => Ok(EvaluationResult::String(expression.evaluate_string()?)),
-            Self::Boolean => Ok(EvaluationResult::Boolean(expression.evaluate_boolean()?)),
+            Self::Number => Ok(EvaluationResult::Number(
+                expression.evaluate_number(environment)?,
+            )),
+            Self::String => Ok(EvaluationResult::String(
+                expression.evaluate_string(environment)?,
+            )),
+            Self::Boolean => Ok(EvaluationResult::Boolean(
+                expression.evaluate_boolean(environment)?,
+            )),
         }
     }
 }
@@ -459,6 +617,17 @@ pub(crate) enum EvaluationResult {
     String(String),
     Boolean(bool),
     Nil,
+}
+
+impl EvaluationResult {
+    fn data_type(&self) -> Option<DataType> {
+        match self {
+            Self::Number(_) => Some(DataType::Number),
+            Self::String(_) => Some(DataType::String),
+            Self::Boolean(_) => Some(DataType::Boolean),
+            Self::Nil => None,
+        }
+    }
 }
 
 impl Display for EvaluationResult {
@@ -474,10 +643,16 @@ impl Display for EvaluationResult {
 
 #[cfg(test)]
 mod tests {
+
     use super::BinaryOperator::{Add, Divide, Equal, LessThan, Multiply};
     use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
     use super::Literal::Nil;
-    use super::{EvaluationError, EvaluationResult, Expression, Literal, UnaryOperator};
+    use super::{
+        BinaryOperator, EvaluationError, EvaluationResult, ExecutionError, Expression, Literal,
+        Statement, UnaryOperator,
+    };
+    use crate::environment::Environment;
+    use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One, Zero};
     use std::str::FromStr;
 
@@ -506,8 +681,10 @@ mod tests {
 
     fn successful_evaluation_test(expression: &Expression, expected: &EvaluationResult) {
         // given
+        let environment = Environment::default();
+
         // when
-        let result = expression.evaluate().unwrap();
+        let result = expression.evaluate(&environment).unwrap();
 
         // then
         assert_eq!(
@@ -519,8 +696,10 @@ mod tests {
 
     fn unsuccessful_evaluation_test(expression: &Expression, expected: &EvaluationError) {
         // given
+        let environment = Environment::default();
+
         // when
-        let result = expression.evaluate().unwrap_err();
+        let result = expression.evaluate(&environment).unwrap_err();
 
         // then
         assert_eq!(
@@ -528,6 +707,20 @@ mod tests {
             "expression {:?} did not yield error: {:?}",
             expression, expected
         );
+    }
+
+    fn unsuccessful_execution_test(statement: &Statement, expected: &ExecutionError) {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = StandardSideEffects::default();
+
+        // when
+        let result = statement.execute(&mut environment, &mut side_effects);
+
+        // then
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error, *expected);
     }
 
     macro_rules! successful_evaluation_tests {
@@ -660,5 +853,160 @@ mod tests {
             },
             NilValue,
         ),
+    }
+
+    macro_rules! unsuccessful_execution_tests {
+        ($($name:ident: $value:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let (expression, expected) = $value;
+                unsuccessful_execution_test(&expression, &expected);
+            }
+        )*
+        }
+    }
+
+    unsuccessful_execution_tests! {
+        use_variable_before_declaration: (
+            Statement::Print(Expression::Variable("a".to_string())),
+            ExecutionError::Evaluation(EvaluationError::Undefined),
+        ),
+    }
+
+    #[test]
+    fn print_variable() {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = TestSideEffects::default();
+        let variable_definition = Statement::Variable {
+            identifier: "beverage".to_string(),
+            expression: Some(Expression::Literal(Literal::String("espresso".to_string()))),
+        };
+        let print_statement = Statement::Print(Expression::Variable("beverage".to_string()));
+
+        // when
+        variable_definition
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to define variable");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to execute print statement");
+
+        // then
+        assert_eq!(side_effects.lines.len(), 1);
+        assert_eq!(side_effects.lines[0], "espresso");
+    }
+
+    #[test]
+    fn redefine_variable() {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = TestSideEffects::default();
+
+        let initial_definition = Statement::Variable {
+            identifier: "a".to_string(),
+            expression: Some(Expression::Literal(Literal::String("before".to_string()))),
+        };
+        let subsequent_definition = Statement::Variable {
+            identifier: "a".to_string(),
+            expression: Some(Expression::Literal(Literal::String("after".to_string()))),
+        };
+        let print_statement = Statement::Print(Expression::Variable("a".to_string()));
+
+        // when
+        initial_definition
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to define variable");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to print initial variable value");
+        subsequent_definition
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to redefine variable");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to print subsequent variable value");
+
+        // then
+        assert_eq!(side_effects.lines.len(), 2);
+        assert_eq!(side_effects.lines[0], "before");
+        assert_eq!(side_effects.lines[1], "after");
+    }
+
+    #[test]
+    fn uninitialized_variables_are_nil() {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = TestSideEffects::default();
+
+        let declaration = Statement::Variable {
+            identifier: "a".to_string(),
+            expression: None,
+        };
+        let print_statement = Statement::Print(Expression::Variable("a".to_string()));
+
+        // when
+        declaration
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to declare variable");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to print initial variable value");
+
+        // then
+        assert_eq!(side_effects.lines.len(), 1);
+        assert_eq!(side_effects.lines[0], "nil");
+    }
+
+    #[test]
+    fn math_on_variables() {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = TestSideEffects::default();
+
+        let define_a = Statement::Variable {
+            identifier: "a".to_string(),
+            expression: Some(Expression::Literal(Literal::Number(BigDecimal::one()))),
+        };
+        let define_b = Statement::Variable {
+            identifier: "b".to_string(),
+            expression: Some(Expression::Literal(Literal::Number(BigDecimal::from(2)))),
+        };
+        let print_statement = Statement::Print(Expression::Binary {
+            operator: BinaryOperator::Add,
+            left_value: Box::new(Expression::Variable("a".to_string())),
+            right_value: Box::new(Expression::Variable("b".to_string())),
+        });
+
+        // when
+        define_a
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to define a");
+        define_b
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to define b");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to print evaluation result");
+
+        // then
+        assert_eq!(side_effects.lines.len(), 1);
+        assert_eq!(side_effects.lines[0], "3e0");
+    }
+
+    #[derive(Default)]
+    struct TestSideEffects {
+        lines: Vec<String>,
+    }
+
+    impl SideEffects for TestSideEffects {
+        fn println(&mut self, text: &str) {
+            self.lines.push(text.to_string());
+        }
+
+        // fn eprintln(&mut self, text: &str) {
+        //     eprintln!("{}", text);
+        // }
     }
 }

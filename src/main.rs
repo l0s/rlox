@@ -1,8 +1,10 @@
+mod environment;
 mod grammar;
 mod interpreter;
 mod lexical_error;
 mod parser;
 mod scanner;
+mod side_effects;
 mod token;
 
 use std::env::args;
@@ -10,6 +12,7 @@ use std::io::Write;
 use std::process::exit;
 use std::{fs, io};
 
+use crate::side_effects::StandardSideEffects;
 use interpreter::Interpreter;
 use interpreter::InterpreterError;
 
@@ -19,7 +22,7 @@ fn main() {
         println!("Usage: rlox [script]");
         exit(64);
     } else {
-        let mut interpreter = Interpreter;
+        let mut interpreter = Interpreter::default();
         let (lex_parse_errors, execution_errors) = if arguments.len() == 2 {
             run_file(&mut interpreter, &arguments[1])
         } else {
@@ -36,14 +39,14 @@ fn main() {
     }
 }
 
-fn run_file(interpreter: &mut Interpreter, path: &str) -> (usize, usize) {
+fn run_file(interpreter: &mut Interpreter<StandardSideEffects>, path: &str) -> (usize, usize) {
     let source =
         fs::read_to_string(path).unwrap_or_else(|_| panic!("Unable to read file at: {}", path));
     let result = interpreter.run(&source);
     report(result)
 }
 
-fn prompt(interpreter: &mut Interpreter) -> (usize, usize) {
+fn prompt(interpreter: &mut Interpreter<StandardSideEffects>) -> (usize, usize) {
     let mut lex_parse_errors = 0;
     let mut execution_errors = 0;
 
