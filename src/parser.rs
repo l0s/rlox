@@ -1,8 +1,7 @@
-use crate::grammar::Expression::{Binary, Unary};
 use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
 use crate::parser::ParseError::{
-    InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken, InvalidUnaryOperator,
-    UnclosedGrouping, UnterminatedStatement, VariableNameExpected,
+    InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
+    InvalidUnaryOperator, UnclosedGrouping, UnterminatedStatement, VariableNameExpected,
 };
 use crate::token::TokenType::Semicolon;
 use crate::token::{Token, TokenType};
@@ -32,6 +31,7 @@ pub(crate) enum ParseError {
     /// Statement is missing a semicolon
     UnterminatedStatement,
     VariableNameExpected,
+    InvalidAssignmentTarget(Token),
 }
 
 impl TryFrom<Token> for BinaryOperator {
@@ -106,9 +106,10 @@ impl Parser {
         }
         match self.statement() {
             Ok(statement) => Ok(Some(statement)),
-            Err(_) => {
+            Err(e) => {
+                eprintln!("Error parsing statement: {:?}", e);
                 self.synchronize();
-                Ok(None) // TODO how do we communicate the parse error?
+                Err(e)
             }
         }
     }
@@ -149,7 +150,20 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Expression, ParseError> {
-        self.equality()
+        self.assignment()
+    }
+
+    fn assignment(&mut self) -> Result<Expression, ParseError> {
+        let expression = self.equality()?;
+        if self.token_match(&[TokenType::Assignment]) {
+            let value = self.assignment()?;
+            return if let Expression::Variable(name) = expression.clone() {
+                Ok(Expression::Assignment(name, Box::new(value)))
+            } else {
+                Err(InvalidAssignmentTarget(self.previous().clone()))
+            };
+        }
+        Ok(expression)
     }
 
     fn equality(&mut self) -> Result<Expression, ParseError> {
@@ -157,7 +171,7 @@ impl Parser {
         while self.token_match(&[TokenType::NotEqual, TokenType::Equal]) {
             let operator_token = self.previous().clone();
             let right_value = self.comparison()?;
-            result = Binary {
+            result = Expression::Binary {
                 operator: operator_token.try_into()?,
                 left_value: Box::new(result.clone()),
                 right_value: Box::new(right_value),
@@ -176,7 +190,7 @@ impl Parser {
         ]) {
             let operator_token = self.previous().clone();
             let right_value = self.term()?;
-            result = Binary {
+            result = Expression::Binary {
                 operator: operator_token.try_into()?,
                 left_value: Box::new(result.clone()),
                 right_value: Box::new(right_value),
@@ -190,7 +204,7 @@ impl Parser {
         while self.token_match(&[TokenType::Minus, TokenType::Plus]) {
             let operator_token = self.previous().clone();
             let right_value = self.factor()?;
-            result = Binary {
+            result = Expression::Binary {
                 operator: operator_token.try_into()?,
                 left_value: Box::new(result.clone()),
                 right_value: Box::new(right_value),
@@ -204,7 +218,7 @@ impl Parser {
         while self.token_match(&[TokenType::ForwardSlash, TokenType::Asterisk]) {
             let operator_token = self.previous().clone();
             let right_value = self.unary()?;
-            result = Binary {
+            result = Expression::Binary {
                 operator: operator_token.try_into()?,
                 left_value: Box::new(result.clone()),
                 right_value: Box::new(right_value),
@@ -217,7 +231,10 @@ impl Parser {
         if self.token_match(&[TokenType::Not, TokenType::Minus]) {
             let operator_token = self.previous().clone();
             let operand = self.unary()?;
-            Ok(Unary(operator_token.try_into()?, Box::new(operand)))
+            Ok(Expression::Unary(
+                operator_token.try_into()?,
+                Box::new(operand),
+            ))
         } else {
             self.primary()
         }
@@ -285,7 +302,7 @@ impl Parser {
         if let Some(current) = self.peek() {
             current.token_type == TokenType::Eof
         } else {
-            false
+            true
         }
     }
 
@@ -327,9 +344,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::{ParseError, Parser};
-    use crate::grammar::Expression::Literal;
-    use crate::grammar::Literal::Number;
-    use crate::grammar::{BinaryOperator, Expression};
+    use crate::grammar::{BinaryOperator, Expression, Literal, Statement};
     use crate::token::{Token, TokenType};
     use bigdecimal::{BigDecimal, One};
     use std::ops::Deref;
@@ -358,7 +373,10 @@ mod tests {
         } = result
         {
             assert_eq!(operator, BinaryOperator::Subtract);
-            assert_eq!(right_value, Box::new(Literal(Number(BigDecimal::one()))));
+            assert_eq!(
+                right_value,
+                Box::new(Expression::Literal(BigDecimal::one().into()))
+            );
             if let Expression::Binary {
                 operator,
                 left_value,
@@ -366,8 +384,14 @@ mod tests {
             } = left_value.deref()
             {
                 assert_eq!(*operator, BinaryOperator::Subtract);
-                assert_eq!(*left_value, Box::new(Literal(Number(BigDecimal::from(5)))));
-                assert_eq!(*right_value, Box::new(Literal(Number(BigDecimal::from(3)))));
+                assert_eq!(
+                    *left_value,
+                    Box::new(Expression::Literal(BigDecimal::from(5).into()))
+                );
+                assert_eq!(
+                    *right_value,
+                    Box::new(Expression::Literal(BigDecimal::from(3).into()))
+                );
             } else {
                 panic!("Expected binary expression, got: {:?}", left_value)
             }
@@ -402,7 +426,10 @@ mod tests {
         } = result
         {
             assert_eq!(operator, BinaryOperator::Subtract);
-            assert_eq!(right_value, Box::new(Literal(Number(BigDecimal::one()))));
+            assert_eq!(
+                right_value,
+                Box::new(Expression::Literal(BigDecimal::one().into()))
+            );
             if let Expression::Grouping(left_value) = *left_value {
                 if let Expression::Binary {
                     operator,
@@ -411,8 +438,14 @@ mod tests {
                 } = left_value.deref()
                 {
                     assert_eq!(*operator, BinaryOperator::Divide);
-                    assert_eq!(*left_value, Box::new(Literal(Number(BigDecimal::from(6)))));
-                    assert_eq!(*right_value, Box::new(Literal(Number(BigDecimal::from(3)))));
+                    assert_eq!(
+                        *left_value,
+                        Box::new(Expression::Literal(BigDecimal::from(6).into()))
+                    );
+                    assert_eq!(
+                        *right_value,
+                        Box::new(Expression::Literal(BigDecimal::from(3).into()))
+                    );
                 } else {
                     panic!("Expected binary expression, got: {:?}", left_value);
                 }
@@ -444,6 +477,80 @@ mod tests {
             ParseError::UnclosedGrouping => {}
             _ => panic!("Expected unclosed grouping error but got: {:?}", result),
         }
+    }
+
+    #[test]
+    fn parse_assignment() {
+        // given
+        let tokens = [
+            Token::new(TokenType::Identifier, "a".to_string(), 0),
+            Token::new(TokenType::Assignment, "=".to_string(), 0),
+            Token::new_int(3),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let mut parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse assignment");
+
+        // then
+        assert_eq!(result.len(), 1);
+
+        assert!(matches!(result.get(0).unwrap(),
+            Statement::Expression(Expression::Assignment(name, value))
+            if name == "a"
+            && matches!(value.as_ref(),
+                Expression::Literal(Literal::Number(value))
+                if *value == BigDecimal::from(3))));
+    }
+
+    #[test]
+    fn cannot_assign_to_grouping() {
+        // given
+        let tokens = [
+            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            Token::new(TokenType::Identifier, "a".to_string(), 0),
+            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
+            Token::new(TokenType::Assignment, "=".to_string(), 0),
+            Token::new_int(3),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: ParseError = <Parser as TryInto<Vec<Statement>>>::try_into(parser)
+            .expect_err("Expected parse error");
+
+        // then
+        assert!(
+            matches!(result, ParseError::InvalidAssignmentTarget(target) if target.token_type == TokenType::NumberLiteral)
+        );
+    }
+
+    #[test]
+    fn cannot_assign_to_expression() {
+        // given
+        let tokens = [
+            Token::new(TokenType::Identifier, "a".to_string(), 0),
+            Token::new(TokenType::Plus, "+".to_string(), 0),
+            Token::new(TokenType::Identifier, "b".to_string(), 0),
+            Token::new(TokenType::Assignment, "=".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: ParseError = <Parser as TryInto<Vec<Statement>>>::try_into(parser)
+            .expect_err("Expected parse error");
+
+        // then
+        assert!(
+            matches!(result, ParseError::InvalidAssignmentTarget(target) if target.token_type == TokenType::Identifier)
+        );
     }
 
     impl Token {

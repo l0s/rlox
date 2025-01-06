@@ -14,4 +14,8 @@ impl Environment {
     pub fn get(&self, name: &str) -> Option<&EvaluationResult> {
         self.values.get(name)
     }
+
+    pub fn exists(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
 }

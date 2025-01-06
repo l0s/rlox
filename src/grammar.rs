@@ -1,11 +1,10 @@
 use crate::environment::Environment;
-use crate::grammar::EvaluationError::Undefined;
 use crate::side_effects::SideEffects;
 use bigdecimal::{BigDecimal, Zero};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Neg;
 use std::str::FromStr;
-use EvaluationError::{DivideByZero, NilValue, TypeMismatch};
+use EvaluationError::{DivideByZero, NilValue, TypeMismatch, Undefined};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
@@ -74,7 +73,7 @@ impl Statement {
     }
 }
 
-/// An expression evaluates to a value and produces no side effects.
+/// An expression evaluates to a value
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Expression {
     Literal(Literal),
@@ -87,6 +86,8 @@ pub(crate) enum Expression {
     Grouping(Box<Expression>),
     /// A reference to a variable's value
     Variable(String),
+    /// Assign a new value to an existing variable
+    Assignment(String, Box<Expression>),
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
@@ -106,7 +107,10 @@ impl ResultType {
 }
 
 impl Expression {
-    pub fn evaluate(&self, environment: &Environment) -> Result<EvaluationResult, EvaluationError> {
+    pub fn evaluate(
+        &self,
+        environment: &mut Environment,
+    ) -> Result<EvaluationResult, EvaluationError> {
         match self.result_type(environment) {
             ResultType::None => Ok(EvaluationResult::Nil),
             ResultType::Some(data_type) => data_type.evaluate(self, environment),
@@ -140,10 +144,11 @@ impl Expression {
                     ResultType::Undefined
                 }
             }
+            Self::Assignment(_, expression) => expression.result_type(environment),
         }
     }
 
-    pub fn evaluate_boolean(&self, environment: &Environment) -> Result<bool, EvaluationError> {
+    pub fn evaluate_boolean(&self, environment: &mut Environment) -> Result<bool, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
                 Literal::False | Literal::Nil => Ok(false),
@@ -173,12 +178,20 @@ impl Expression {
                     Ok(false)
                 }
             }
+            Self::Assignment(identifier, expression) => {
+                let result = expression.evaluate_boolean(environment)?;
+                if !environment.exists(identifier) {
+                    return Err(Undefined);
+                }
+                environment.define(identifier.clone(), EvaluationResult::Boolean(result));
+                Ok(result)
+            }
         }
     }
 
     pub fn evaluate_number(
         &self,
-        environment: &Environment,
+        environment: &mut Environment,
     ) -> Result<BigDecimal, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
@@ -210,10 +223,21 @@ impl Expression {
                     Err(NilValue)
                 }
             }
+            Self::Assignment(identifier, expression) => {
+                let result = expression.evaluate_number(environment)?;
+                if !environment.exists(identifier) {
+                    return Err(Undefined);
+                }
+                environment.define(identifier.clone(), EvaluationResult::Number(result.clone()));
+                Ok(result)
+            }
         }
     }
 
-    pub fn evaluate_string(&self, environment: &Environment) -> Result<String, EvaluationError> {
+    pub fn evaluate_string(
+        &self,
+        environment: &mut Environment,
+    ) -> Result<String, EvaluationError> {
         match self {
             Self::Literal(literal) => match literal {
                 Literal::String(value) => Ok(value.clone()),
@@ -237,6 +261,14 @@ impl Expression {
                 } else {
                     Err(NilValue)
                 }
+            }
+            Self::Assignment(identifier, expression) => {
+                let result = expression.evaluate_string(environment)?;
+                if !environment.exists(identifier) {
+                    return Err(Undefined);
+                }
+                environment.define(identifier.clone(), EvaluationResult::String(result.clone()));
+                Ok(result)
             }
         }
     }
@@ -277,6 +309,9 @@ impl Debug for Expression {
             }
             Self::Grouping(expression) => write!(f, "(group {:?})", expression),
             Self::Variable(name) => write!(f, "(var {})", name),
+            Self::Assignment(identifier, expression) => {
+                write!(f, "(set {} {:?})", identifier, expression)
+            }
         }
     }
 }
@@ -307,7 +342,7 @@ pub(crate) enum BinaryOperator {
 impl BinaryOperator {
     pub fn evaluate_boolean(
         &self,
-        environment: &Environment,
+        environment: &mut Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<bool, EvaluationError> {
@@ -420,7 +455,7 @@ impl BinaryOperator {
 
     pub fn evaluate_number(
         &self,
-        environment: &Environment,
+        environment: &mut Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<BigDecimal, EvaluationError> {
@@ -445,7 +480,7 @@ impl BinaryOperator {
 
     pub fn evaluate_string(
         &self,
-        environment: &Environment,
+        environment: &mut Environment,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<String, EvaluationError> {
@@ -455,8 +490,8 @@ impl BinaryOperator {
             if left_type == ResultType::Some(DataType::String)
                 || right_type == ResultType::Some(DataType::String)
             {
-                let convert_to_string = |expression: &Expression,
-                                         data_type: ResultType|
+                let mut convert_to_string = |expression: &Expression,
+                                             data_type: ResultType|
                  -> Result<String, EvaluationError> {
                     Ok(match data_type {
                         ResultType::None => "".to_string(),
@@ -595,7 +630,7 @@ impl DataType {
     pub fn evaluate(
         &self,
         expression: &Expression,
-        environment: &Environment,
+        environment: &mut Environment,
     ) -> Result<EvaluationResult, EvaluationError> {
         match self {
             Self::Number => Ok(EvaluationResult::Number(
@@ -681,10 +716,10 @@ mod tests {
 
     fn successful_evaluation_test(expression: &Expression, expected: &EvaluationResult) {
         // given
-        let environment = Environment::default();
+        let mut environment = Environment::default();
 
         // when
-        let result = expression.evaluate(&environment).unwrap();
+        let result = expression.evaluate(&mut environment).unwrap();
 
         // then
         assert_eq!(
@@ -696,10 +731,10 @@ mod tests {
 
     fn unsuccessful_evaluation_test(expression: &Expression, expected: &EvaluationError) {
         // given
-        let environment = Environment::default();
+        let mut environment = Environment::default();
 
         // when
-        let result = expression.evaluate(&environment).unwrap_err();
+        let result = expression.evaluate(&mut environment).unwrap_err();
 
         // then
         assert_eq!(
@@ -872,6 +907,10 @@ mod tests {
             Statement::Print(Expression::Variable("a".to_string())),
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
+        assignment_without_declaration: (
+            Statement::Expression(Expression::Assignment("a".to_string(), Box::new(Expression::Literal(BigDecimal::one().into())))),
+            ExecutionError::Evaluation(EvaluationError::Undefined),
+        ),
     }
 
     #[test]
@@ -993,6 +1032,38 @@ mod tests {
         // then
         assert_eq!(side_effects.lines.len(), 1);
         assert_eq!(side_effects.lines[0], "3e0");
+    }
+
+    #[test]
+    fn assignment_returns_value() {
+        // given
+        let mut environment = Environment::default();
+        let mut side_effects = TestSideEffects::default();
+
+        let define_a = Statement::Variable {
+            identifier: "a".to_string(),
+            expression: Some(Expression::Literal(BigDecimal::one().into())),
+        };
+        let print_statement = Statement::Print(Expression::Assignment(
+            "a".to_string(),
+            Box::new(Expression::Literal(BigDecimal::from(2).into())),
+        ));
+
+        // when
+        define_a
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to define variable");
+        print_statement
+            .execute(&mut environment, &mut side_effects)
+            .expect("Unable to print expression");
+
+        // then
+        assert_eq!(side_effects.lines.len(), 1);
+        assert_eq!(side_effects.lines[0], "2e0");
+        assert_eq!(
+            environment.get("a"),
+            Some(&EvaluationResult::Number(BigDecimal::from(2).into()))
+        );
     }
 
     #[derive(Default)]
