@@ -1,9 +1,9 @@
 use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
-    InvalidUnaryOperator, UnclosedGrouping, UnterminatedStatement, VariableNameExpected,
+    InvalidUnaryOperator, UnclosedGrouping, UnterminatedBlock, UnterminatedStatement,
+    VariableNameExpected,
 };
-use crate::token::TokenType::Semicolon;
 use crate::token::{Token, TokenType};
 
 #[derive(Debug)]
@@ -30,6 +30,8 @@ pub(crate) enum ParseError {
     UnclosedGrouping,
     /// Statement is missing a semicolon
     UnterminatedStatement,
+    /// Block is missing the closing brace
+    UnterminatedBlock,
     VariableNameExpected,
     InvalidAssignmentTarget(Token),
 }
@@ -122,7 +124,7 @@ impl Parser {
         } else {
             None
         };
-        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
         Ok(Statement::VariableDeclaration {
             identifier,
             expression,
@@ -132,20 +134,36 @@ impl Parser {
     fn statement(&mut self) -> Result<Statement, ParseError> {
         if self.token_match(&[TokenType::Print]) {
             self.print_statement()
+        } else if self.token_match(&[TokenType::OpenBrace]) {
+            self.block()
         } else {
             self.expression_statement()
         }
     }
 
+    fn block(&mut self) -> Result<Statement, ParseError> {
+        let mut statements = vec![];
+
+        while !self.check(&TokenType::CloseBrace) && !self.at_end() {
+            if let Some(declaration) = self.declaration()? {
+                statements.push(declaration);
+            }
+        }
+
+        self.consume(&TokenType::CloseBrace, UnterminatedBlock)?;
+
+        Ok(Statement::Block(statements))
+    }
+
     fn print_statement(&mut self) -> Result<Statement, ParseError> {
         let value = self.expression()?;
-        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated expression
+        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated expression
         Ok(Statement::Print(value))
     }
 
     fn expression_statement(&mut self) -> Result<Statement, ParseError> {
         let expression = self.expression()?;
-        self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
         Ok(Statement::Expression(expression))
     }
 
@@ -320,7 +338,7 @@ impl Parser {
     fn synchronize(&mut self) {
         self.advance();
         while !self.at_end() {
-            if self.previous().token_type == Semicolon {
+            if self.previous().token_type == TokenType::Semicolon {
                 return;
             }
 

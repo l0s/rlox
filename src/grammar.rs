@@ -1,8 +1,10 @@
 use crate::environment::{Environment, ExistsError};
 use crate::side_effects::SideEffects;
 use bigdecimal::{BigDecimal, Zero};
+use std::cell::RefCell;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Neg;
+use std::rc::Rc;
 use std::str::FromStr;
 use EvaluationError::{DivideByZero, NilValue, TypeMismatch, Undefined};
 
@@ -26,6 +28,8 @@ pub(crate) enum Statement {
         /// If None, this is a variable declaration without assignment
         expression: Option<Expression>,
     },
+
+    Block(Vec<Statement>),
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -37,19 +41,19 @@ pub(crate) enum ExecutionError {
 impl Statement {
     pub fn execute<S: SideEffects>(
         &self,
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
         side_effects: &mut S,
     ) -> Result<(), ExecutionError> {
         match self {
             Self::Expression(expression) => {
                 expression
-                    .evaluate(environment)
+                    .evaluate(&mut environment.borrow_mut())
                     .map_err(ExecutionError::Evaluation)?;
                 Ok(())
             }
             Self::Print(value) => {
                 let result = value
-                    .evaluate(environment)
+                    .evaluate(&mut environment.borrow_mut())
                     .map_err(ExecutionError::Evaluation)?;
 
                 side_effects.println(&format!("{}", result));
@@ -62,14 +66,24 @@ impl Statement {
             } => {
                 let result = expression
                     .clone() // TODO can we avoid cloning?
-                    .map(|e| e.evaluate(environment))
+                    .map(|e| e.evaluate(&mut environment.borrow_mut()))
                     .unwrap_or(Ok(EvaluationResult::Nil))
                     .map_err(ExecutionError::Evaluation)?;
 
                 environment
+                    .borrow_mut()
                     .define(identifier.clone(), result)
                     .map_err(ExecutionError::CannotRedefineVariable)?;
 
+                Ok(())
+            }
+            Self::Block(statements) => {
+                let child = Rc::new(RefCell::new(Environment::new_nested_scope(
+                    environment.clone(),
+                )));
+                for statement in statements {
+                    statement.execute(child.clone(), side_effects)?;
+                }
                 Ok(())
             }
         }
@@ -676,7 +690,6 @@ impl Display for EvaluationResult {
 
 #[cfg(test)]
 mod tests {
-
     use super::BinaryOperator::{Add, Divide, Equal, LessThan, Multiply};
     use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
     use super::Literal::Nil;
@@ -687,6 +700,8 @@ mod tests {
     use crate::environment::Environment;
     use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One, Zero};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::str::FromStr;
 
     #[test]
@@ -744,11 +759,11 @@ mod tests {
 
     fn unsuccessful_execution_test(statement: &Statement, expected: &ExecutionError) {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = StandardSideEffects::default();
 
         // when
-        let result = statement.execute(&mut environment, &mut side_effects);
+        let result = statement.execute(environment, &mut side_effects);
 
         // then
         assert!(result.is_err());
@@ -914,7 +929,7 @@ mod tests {
     #[test]
     fn print_variable() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = TestSideEffects::default();
         let variable_definition = Statement::VariableDeclaration {
             identifier: "beverage".to_string(),
@@ -925,10 +940,10 @@ mod tests {
 
         // when
         variable_definition
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to define variable");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment, &mut side_effects)
             .expect("Unable to execute print statement");
 
         // then
@@ -939,7 +954,7 @@ mod tests {
     #[test]
     fn redefine_variable() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = TestSideEffects::default();
 
         let initial_definition = Statement::VariableDeclaration {
@@ -954,16 +969,16 @@ mod tests {
 
         // when
         initial_definition
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to define variable");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to print initial variable value");
         subsequent_definition
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to redefine variable");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment, &mut side_effects)
             .expect("Unable to print subsequent variable value");
 
         // then
@@ -975,7 +990,7 @@ mod tests {
     #[test]
     fn uninitialized_variables_are_nil() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = TestSideEffects::default();
 
         let declaration = Statement::VariableDeclaration {
@@ -986,10 +1001,10 @@ mod tests {
 
         // when
         declaration
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to declare variable");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment, &mut side_effects)
             .expect("Unable to print initial variable value");
 
         // then
@@ -1000,7 +1015,7 @@ mod tests {
     #[test]
     fn math_on_variables() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = TestSideEffects::default();
 
         let define_a = Statement::VariableDeclaration {
@@ -1019,13 +1034,13 @@ mod tests {
 
         // when
         define_a
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to define a");
         define_b
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to define b");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment, &mut side_effects)
             .expect("Unable to print evaluation result");
 
         // then
@@ -1036,7 +1051,7 @@ mod tests {
     #[test]
     fn assignment_returns_value() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
         let mut side_effects = TestSideEffects::default();
 
         let define_a = Statement::VariableDeclaration {
@@ -1050,17 +1065,17 @@ mod tests {
 
         // when
         define_a
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to define variable");
         print_statement
-            .execute(&mut environment, &mut side_effects)
+            .execute(environment.clone(), &mut side_effects)
             .expect("Unable to print expression");
 
         // then
         assert_eq!(side_effects.lines.len(), 1);
         assert_eq!(side_effects.lines[0], "2e0");
         assert_eq!(
-            environment.get("a"),
+            environment.borrow().get("a"),
             Ok(EvaluationResult::Number(BigDecimal::from(2).into()))
         );
     }

@@ -6,11 +6,13 @@ use crate::parser::{ParseError, Parser};
 use crate::scanner::Scanner;
 use crate::side_effects::{SideEffects, StandardSideEffects};
 use crate::token::Token;
+use std::cell::RefCell;
+use std::rc::Rc;
 use InterpreterError::{Lex, Parse};
 
 /// An interpreter takes source code and executes it
 pub(crate) struct Interpreter<S: SideEffects> {
-    environment: Environment,
+    environment: Rc<RefCell<Environment>>,
     side_effects: S,
 }
 
@@ -51,7 +53,7 @@ impl<S: SideEffects> Interpreter<S> {
         let statements: Vec<Statement> = parser.try_into().map_err(Parse)?;
         for statement in statements {
             statement
-                .execute(&mut self.environment, &mut self.side_effects)
+                .execute(self.environment.clone(), &mut self.side_effects)
                 .map_err(Execution)?;
         }
 
