@@ -1,4 +1,4 @@
-use crate::environment::Environment;
+use crate::environment::{Environment, ExistsError};
 use crate::side_effects::SideEffects;
 use bigdecimal::{BigDecimal, Zero};
 use std::fmt::{Debug, Display, Formatter};
@@ -21,7 +21,7 @@ pub(crate) enum Statement {
     Print(Expression),
 
     /// A variable declaration with optional definition
-    Variable {
+    VariableDeclaration {
         identifier: String,
         /// If None, this is a variable declaration without assignment
         expression: Option<Expression>,
@@ -31,6 +31,7 @@ pub(crate) enum Statement {
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum ExecutionError {
     Evaluation(EvaluationError),
+    CannotRedefineVariable(ExistsError),
 }
 
 impl Statement {
@@ -55,7 +56,7 @@ impl Statement {
 
                 Ok(())
             }
-            Self::Variable {
+            Self::VariableDeclaration {
                 identifier,
                 expression,
             } => {
@@ -65,7 +66,9 @@ impl Statement {
                     .unwrap_or(Ok(EvaluationResult::Nil))
                     .map_err(ExecutionError::Evaluation)?;
 
-                environment.define(identifier.clone(), result);
+                environment
+                    .define(identifier.clone(), result)
+                    .map_err(ExecutionError::CannotRedefineVariable)?;
 
                 Ok(())
             }
@@ -84,8 +87,7 @@ pub(crate) enum Expression {
         right_value: Box<Expression>,
     },
     Grouping(Box<Expression>),
-    /// A reference to a variable's value
-    Variable(String),
+    VariableReference(String),
     /// Assign a new value to an existing variable
     Assignment(String, Box<Expression>),
 }
@@ -133,8 +135,8 @@ impl Expression {
                 right_value,
             } => operator.result_type(environment, left_value, right_value),
             Self::Grouping(expression) => expression.result_type(environment),
-            Self::Variable(name) => {
-                if let Some(value) = environment.get(name) {
+            Self::VariableReference(name) => {
+                if let Ok(value) = environment.get(name) {
                     if let Some(data_type) = value.data_type() {
                         ResultType::Some(data_type)
                     } else {
@@ -167,11 +169,11 @@ impl Expression {
                 right_value,
             } => operator.evaluate_boolean(environment, left_value, right_value),
             Self::Grouping(expression) => expression.evaluate_boolean(environment),
-            Self::Variable(name) => {
-                if let Some(value) = environment.get(name) {
+            Self::VariableReference(name) => {
+                if let Ok(value) = environment.get(name) {
                     match value {
                         EvaluationResult::Number(_) | EvaluationResult::String(_) => Ok(true),
-                        EvaluationResult::Boolean(value) => Ok(*value),
+                        EvaluationResult::Boolean(value) => Ok(value),
                         EvaluationResult::Nil => Ok(false),
                     }
                 } else {
@@ -180,10 +182,9 @@ impl Expression {
             }
             Self::Assignment(identifier, expression) => {
                 let result = expression.evaluate_boolean(environment)?;
-                if !environment.exists(identifier) {
-                    return Err(Undefined);
-                }
-                environment.define(identifier.clone(), EvaluationResult::Boolean(result));
+                environment
+                    .assign(identifier.clone(), EvaluationResult::Boolean(result))
+                    .map_err(|_| Undefined)?;
                 Ok(result)
             }
         }
@@ -212,8 +213,8 @@ impl Expression {
                 right_value,
             } => operator.evaluate_number(environment, left_value, right_value),
             Self::Grouping(expression) => expression.evaluate_number(environment),
-            Self::Variable(name) => {
-                if let Some(value) = environment.get(name) {
+            Self::VariableReference(name) => {
+                if let Ok(value) = environment.get(name) {
                     if let EvaluationResult::Number(value) = value {
                         Ok(value.clone())
                     } else {
@@ -225,10 +226,9 @@ impl Expression {
             }
             Self::Assignment(identifier, expression) => {
                 let result = expression.evaluate_number(environment)?;
-                if !environment.exists(identifier) {
-                    return Err(Undefined);
-                }
-                environment.define(identifier.clone(), EvaluationResult::Number(result.clone()));
+                environment
+                    .assign(identifier.clone(), EvaluationResult::Number(result.clone()))
+                    .map_err(|_| Undefined)?;
                 Ok(result)
             }
         }
@@ -251,23 +251,21 @@ impl Expression {
                 right_value,
             } => operator.evaluate_string(environment, left_value, right_value),
             Self::Grouping(expression) => expression.evaluate_string(environment),
-            Self::Variable(name) => {
-                if let Some(value) = environment.get(name) {
+            Self::VariableReference(name) => match environment.get(name) {
+                Ok(value) => {
                     if let EvaluationResult::String(value) = value {
                         Ok(value.clone())
                     } else {
                         Err(TypeMismatch)
                     }
-                } else {
-                    Err(NilValue)
                 }
-            }
+                Err(_) => Err(Undefined),
+            },
             Self::Assignment(identifier, expression) => {
                 let result = expression.evaluate_string(environment)?;
-                if !environment.exists(identifier) {
-                    return Err(Undefined);
-                }
-                environment.define(identifier.clone(), EvaluationResult::String(result.clone()));
+                environment
+                    .assign(identifier.clone(), EvaluationResult::String(result.clone()))
+                    .map_err(|_| Undefined)?;
                 Ok(result)
             }
         }
@@ -308,7 +306,7 @@ impl Debug for Expression {
                 write!(f, "({} {:?} {:?})", symbol, left_value, right_value)
             }
             Self::Grouping(expression) => write!(f, "(group {:?})", expression),
-            Self::Variable(name) => write!(f, "(var {})", name),
+            Self::VariableReference(name) => write!(f, "(var {})", name),
             Self::Assignment(identifier, expression) => {
                 write!(f, "(set {} {:?})", identifier, expression)
             }
@@ -904,7 +902,7 @@ mod tests {
 
     unsuccessful_execution_tests! {
         use_variable_before_declaration: (
-            Statement::Print(Expression::Variable("a".to_string())),
+            Statement::Print(Expression::VariableReference("a".to_string())),
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
         assignment_without_declaration: (
@@ -918,11 +916,12 @@ mod tests {
         // given
         let mut environment = Environment::default();
         let mut side_effects = TestSideEffects::default();
-        let variable_definition = Statement::Variable {
+        let variable_definition = Statement::VariableDeclaration {
             identifier: "beverage".to_string(),
             expression: Some(Expression::Literal(Literal::String("espresso".to_string()))),
         };
-        let print_statement = Statement::Print(Expression::Variable("beverage".to_string()));
+        let print_statement =
+            Statement::Print(Expression::VariableReference("beverage".to_string()));
 
         // when
         variable_definition
@@ -943,15 +942,15 @@ mod tests {
         let mut environment = Environment::default();
         let mut side_effects = TestSideEffects::default();
 
-        let initial_definition = Statement::Variable {
+        let initial_definition = Statement::VariableDeclaration {
             identifier: "a".to_string(),
             expression: Some(Expression::Literal(Literal::String("before".to_string()))),
         };
-        let subsequent_definition = Statement::Variable {
+        let subsequent_definition = Statement::VariableDeclaration {
             identifier: "a".to_string(),
             expression: Some(Expression::Literal(Literal::String("after".to_string()))),
         };
-        let print_statement = Statement::Print(Expression::Variable("a".to_string()));
+        let print_statement = Statement::Print(Expression::VariableReference("a".to_string()));
 
         // when
         initial_definition
@@ -979,11 +978,11 @@ mod tests {
         let mut environment = Environment::default();
         let mut side_effects = TestSideEffects::default();
 
-        let declaration = Statement::Variable {
+        let declaration = Statement::VariableDeclaration {
             identifier: "a".to_string(),
             expression: None,
         };
-        let print_statement = Statement::Print(Expression::Variable("a".to_string()));
+        let print_statement = Statement::Print(Expression::VariableReference("a".to_string()));
 
         // when
         declaration
@@ -1004,18 +1003,18 @@ mod tests {
         let mut environment = Environment::default();
         let mut side_effects = TestSideEffects::default();
 
-        let define_a = Statement::Variable {
+        let define_a = Statement::VariableDeclaration {
             identifier: "a".to_string(),
             expression: Some(Expression::Literal(Literal::Number(BigDecimal::one()))),
         };
-        let define_b = Statement::Variable {
+        let define_b = Statement::VariableDeclaration {
             identifier: "b".to_string(),
             expression: Some(Expression::Literal(Literal::Number(BigDecimal::from(2)))),
         };
         let print_statement = Statement::Print(Expression::Binary {
             operator: BinaryOperator::Add,
-            left_value: Box::new(Expression::Variable("a".to_string())),
-            right_value: Box::new(Expression::Variable("b".to_string())),
+            left_value: Box::new(Expression::VariableReference("a".to_string())),
+            right_value: Box::new(Expression::VariableReference("b".to_string())),
         });
 
         // when
@@ -1040,7 +1039,7 @@ mod tests {
         let mut environment = Environment::default();
         let mut side_effects = TestSideEffects::default();
 
-        let define_a = Statement::Variable {
+        let define_a = Statement::VariableDeclaration {
             identifier: "a".to_string(),
             expression: Some(Expression::Literal(BigDecimal::one().into())),
         };
@@ -1062,7 +1061,7 @@ mod tests {
         assert_eq!(side_effects.lines[0], "2e0");
         assert_eq!(
             environment.get("a"),
-            Some(&EvaluationResult::Number(BigDecimal::from(2).into()))
+            Ok(EvaluationResult::Number(BigDecimal::from(2).into()))
         );
     }
 

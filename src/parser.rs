@@ -123,7 +123,7 @@ impl Parser {
             None
         };
         self.consume(&Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
-        Ok(Statement::Variable {
+        Ok(Statement::VariableDeclaration {
             identifier,
             expression,
         })
@@ -157,7 +157,7 @@ impl Parser {
         let expression = self.equality()?;
         if self.token_match(&[TokenType::Assignment]) {
             let value = self.assignment()?;
-            return if let Expression::Variable(name) = expression.clone() {
+            return if let Expression::VariableReference(name) = expression.clone() {
                 Ok(Expression::Assignment(name, Box::new(value)))
             } else {
                 Err(InvalidAssignmentTarget(self.previous().clone()))
@@ -254,7 +254,9 @@ impl Parser {
             self.consume(&TokenType::CloseParenthesis, UnclosedGrouping)?;
             Ok(Expression::Grouping(Box::new(expression)))
         } else if self.token_match(&[TokenType::Identifier]) {
-            Ok(Expression::Variable(self.previous().lexeme.clone()))
+            Ok(Expression::VariableReference(
+                self.previous().lexeme.clone(),
+            ))
         } else {
             Err(InvalidPrimaryToken(
                 self.peek().map(|token| token.token_type),
