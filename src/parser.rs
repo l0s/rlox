@@ -29,7 +29,7 @@ pub(crate) enum ParseError {
     InvalidLiteral(Token),
     UnclosedGrouping,
     /// Statement is missing a semicolon
-    UnterminatedStatement,
+    UnterminatedStatement(Option<Expression>),
     /// Block is missing the closing brace
     UnterminatedBlock,
     VariableNameExpected,
@@ -109,7 +109,6 @@ impl Parser {
         match self.statement() {
             Ok(statement) => Ok(Some(statement)),
             Err(e) => {
-                eprintln!("Error parsing statement: {:?}", e);
                 self.synchronize();
                 Err(e)
             }
@@ -124,7 +123,10 @@ impl Parser {
         } else {
             None
         };
-        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        self.consume(
+            &TokenType::Semicolon,
+            UnterminatedStatement(expression.clone()),
+        )?; // TODO distinguish from unterminated print statement
         Ok(Statement::VariableDeclaration {
             identifier,
             expression,
@@ -157,13 +159,19 @@ impl Parser {
 
     fn print_statement(&mut self) -> Result<Statement, ParseError> {
         let value = self.expression()?;
-        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated expression
+        self.consume(
+            &TokenType::Semicolon,
+            UnterminatedStatement(Some(value.clone())),
+        )?; // TODO distinguish from unterminated expression
         Ok(Statement::Print(value))
     }
 
     fn expression_statement(&mut self) -> Result<Statement, ParseError> {
         let expression = self.expression()?;
-        self.consume(&TokenType::Semicolon, UnterminatedStatement)?; // TODO distinguish from unterminated print statement
+        self.consume(
+            &TokenType::Semicolon,
+            UnterminatedStatement(Some(expression.clone())),
+        )?; // TODO distinguish from unterminated print statement
         Ok(Statement::Expression(expression))
     }
 

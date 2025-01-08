@@ -1,5 +1,5 @@
 use crate::environment::Environment;
-use crate::grammar::{ExecutionError, Statement};
+use crate::grammar::{EvaluationError, EvaluationResult, ExecutionError, Expression, Statement};
 use crate::interpreter::InterpreterError::Execution;
 use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
@@ -13,15 +13,12 @@ use InterpreterError::{Lex, Parse};
 /// An interpreter takes source code and executes it
 pub(crate) struct Interpreter<S: SideEffects> {
     environment: Rc<RefCell<Environment>>,
-    side_effects: S,
+    side_effects: Rc<RefCell<S>>,
 }
 
 impl Default for Interpreter<StandardSideEffects> {
     fn default() -> Self {
-        Self {
-            environment: Default::default(),
-            side_effects: Default::default(),
-        }
+        Self::new(Rc::new(RefCell::new(Default::default())))
     }
 }
 
@@ -36,6 +33,13 @@ pub(crate) enum InterpreterError {
 }
 
 impl<S: SideEffects> Interpreter<S> {
+    pub fn new(side_effects: Rc<RefCell<S>>) -> Self {
+        Self {
+            environment: Default::default(),
+            side_effects,
+        }
+    }
+
     /// Execute a block of Lox source code
     ///
     /// Parameters:
@@ -53,10 +57,17 @@ impl<S: SideEffects> Interpreter<S> {
         let statements: Vec<Statement> = parser.try_into().map_err(Parse)?;
         for statement in statements {
             statement
-                .execute(self.environment.clone(), &mut self.side_effects)
+                .execute(self.environment.clone(), self.side_effects.clone())
                 .map_err(Execution)?;
         }
 
         Ok(())
+    }
+
+    pub fn evaluate(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<EvaluationResult, EvaluationError> {
+        expression.evaluate(&mut self.environment.borrow_mut())
     }
 }
