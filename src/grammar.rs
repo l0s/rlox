@@ -19,6 +19,13 @@ pub(crate) enum Statement {
     /// Evaluates expressions that have side effects
     Expression(Expression),
 
+    /// A conditional or branching control flow
+    If {
+        condition: Expression,
+        then_branch: Box<Statement>,
+        else_branch: Option<Box<Statement>>,
+    },
+
     /// Evaluates an expression and outputs the result
     Print(Expression),
 
@@ -85,6 +92,22 @@ impl Statement {
                     statement.execute(child.clone(), side_effects.clone())?;
                 }
                 Ok(())
+            }
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                if condition
+                    .evaluate_boolean(&mut environment.borrow_mut())
+                    .map_err(ExecutionError::Evaluation)?
+                {
+                    then_branch.execute(environment.clone(), side_effects.clone())
+                } else if let Some(else_branch) = else_branch {
+                    else_branch.execute(environment.clone(), side_effects.clone())
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -609,15 +632,35 @@ impl FromStr for Literal {
     }
 }
 
+impl FromStr for Expression {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::Literal(s.parse()?))
+    }
+}
+
 impl From<String> for Literal {
     fn from(value: String) -> Self {
         Self::String(value)
     }
 }
 
+impl From<String> for Expression {
+    fn from(value: String) -> Self {
+        Self::Literal(value.into())
+    }
+}
+
 impl From<BigDecimal> for Literal {
     fn from(value: BigDecimal) -> Self {
         Self::Number(value)
+    }
+}
+
+impl From<BigDecimal> for Expression {
+    fn from(value: BigDecimal) -> Self {
+        Self::Literal(value.into())
     }
 }
 
@@ -628,6 +671,12 @@ impl From<bool> for Literal {
         } else {
             Self::False
         }
+    }
+}
+
+impl From<bool> for Expression {
+    fn from(value: bool) -> Self {
+        Self::Literal(value.into())
     }
 }
 
@@ -711,13 +760,11 @@ mod tests {
             operator: Multiply,
             left_value: Box::new(Expression::Unary(
                 UnaryOperator::Negative,
-                Box::new(Expression::Literal(Literal::Number(
-                    BigDecimal::from_str("123").unwrap(),
-                ))),
+                Box::new(BigDecimal::from_str("123").unwrap().into()),
             )),
-            right_value: Box::new(Expression::Grouping(Box::new(Expression::Literal(
-                Literal::Number(BigDecimal::from_str("45.67").unwrap()),
-            )))),
+            right_value: Box::new(Expression::Grouping(Box::new(
+                BigDecimal::from_str("45.67").unwrap().into(),
+            ))),
         };
 
         // when
@@ -784,29 +831,29 @@ mod tests {
     }
 
     successful_evaluation_tests! {
-        number_literal: (Expression::Literal(Literal::Number(BigDecimal::from_str("2.718281828").unwrap())), EvaluationResult::Number(BigDecimal::from_str("2.718281828").unwrap())),
-        string_literal: (Expression::Literal(Literal::String("🎄".to_string())), EvaluationResult::String("🎄".to_string())),
+        number_literal: (BigDecimal::from_str("2.718281828").unwrap().into(), EvaluationResult::Number(BigDecimal::from_str("2.718281828").unwrap())),
+        string_literal: ("🎄".to_string().into(), EvaluationResult::String("🎄".to_string())),
         pi_less_than_tau: (
             Expression::Binary {
                 operator: LessThan,
-                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
-                right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("6.283185307179586").unwrap()))),
+                left_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
+                right_value: Box::new(BigDecimal::from_str("6.283185307179586").unwrap().into()),
             },
             EvaluationResult::Boolean(true),
         ),
         string_not_equal_to_number: (
             Expression::Binary {
                 operator: Equal,
-                left_value: Box::new(Expression::Literal(Literal::String("🥧".to_string()))),
-                right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
+                left_value: Box::new("🥧".to_string().into()),
+                right_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
             },
             EvaluationResult::Boolean(false),
         ),
         string_concatenation: (
             Expression::Binary {
                 operator: Add,
-                left_value: Box::new(Expression::Literal(Literal::String("😒".to_string()))),
-                right_value: Box::new(Expression::Literal(Literal::String("😥".to_string()))),
+                left_value: Box::new("😒".to_string().into()),
+                right_value: Box::new("😥".to_string().into()),
             },
             EvaluationResult::String("😒😥".to_string()),
         ),
@@ -815,22 +862,22 @@ mod tests {
             EvaluationResult::Boolean(true),
         ),
         zero_is_truthy: (
-            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::Number(BigDecimal::zero())))),
+            Expression::Unary(UnaryOperator::Not, Box::new(BigDecimal::zero().into())),
             EvaluationResult::Boolean(false),
         ),
         one_is_truthy: (
-            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::Number(BigDecimal::one())))),
+            Expression::Unary(UnaryOperator::Not, Box::new(BigDecimal::one().into())),
             EvaluationResult::Boolean(false),
         ),
         string_is_truthy: (
-            Expression::Unary(UnaryOperator::Not, Box::new(Expression::Literal(Literal::String("🥯".to_string())))),
+            Expression::Unary(UnaryOperator::Not, Box::new("🥯".to_string().into())),
             EvaluationResult::Boolean(false),
         ),
         concatenate_string_and_number: (
             Expression::Binary {
                 operator: Add,
-                left_value: Box::new(Expression::Literal(Literal::String("🥐".to_string()))),
-                right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from(4)))),
+                left_value: Box::new("🥐".to_string().into()),
+                right_value: Box::new(BigDecimal::from(4).into()),
             },
             EvaluationResult::String("🥐4e0".to_string()),
         ),
@@ -838,7 +885,7 @@ mod tests {
             Expression::Binary {
                 operator: Add,
                 left_value: Box::new(Expression::Literal(Nil)),
-                right_value: Box::new(Expression::Literal(Literal::String("🥐".to_string()))),
+                right_value: Box::new("🥐".to_string().into()),
             },
             EvaluationResult::String("🥐".to_string()),
         ),
@@ -860,15 +907,15 @@ mod tests {
         divide_by_zero: (
             Expression::Binary {
                 operator: Divide,
-                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::one()))),
-                right_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::zero()))),
+                left_value: Box::new(BigDecimal::one().into()),
+                right_value: Box::new(BigDecimal::zero().into()),
             },
             DivideByZero,
         ),
         unexpected_nil: (
             Expression::Binary {
                 operator: Multiply,
-                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::one()))),
+                left_value: Box::new(BigDecimal::one().into()),
                 right_value: Box::new(Expression::Literal(Nil)),
             },
             NilValue,
@@ -876,19 +923,19 @@ mod tests {
         type_mismatch: (
             Expression::Binary {
                 operator: LessThan,
-                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3.14159").unwrap()))),
-                right_value: Box::new(Expression::Literal(Literal::String("🥧".to_string()))),
+                left_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
+                right_value: Box::new("🥧".to_string().into()),
             },
             TypeMismatch,
         ),
         cannot_negate_cupcake: (
             Expression::Binary {
                 operator: Multiply,
-                left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("2").unwrap()))),
+                left_value: Box::new(BigDecimal::from_str("2").unwrap().into()),
                 right_value: Box::new(Expression::Grouping(Box::new(Expression::Binary {
                     operator: Divide,
-                    left_value: Box::new(Expression::Literal(Literal::Number(BigDecimal::from_str("3").unwrap()))),
-                    right_value: Box::new(Expression::Unary(UnaryOperator::Negative, Box::new(Expression::Literal(Literal::String("🧁".to_string()))))),
+                    left_value: Box::new(BigDecimal::from_str("3").unwrap().into()),
+                    right_value: Box::new(Expression::Unary(UnaryOperator::Negative, Box::new("🧁".to_string().into()))),
                 })))
             },
             TypeMismatch,
@@ -921,7 +968,7 @@ mod tests {
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
         assignment_without_declaration: (
-            Statement::Expression(Expression::Assignment("a".to_string(), Box::new(Expression::Literal(BigDecimal::one().into())))),
+            Statement::Expression(Expression::Assignment("a".to_string(), Box::new(BigDecimal::one().into()))),
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
     }
@@ -933,7 +980,7 @@ mod tests {
         let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let variable_definition = Statement::VariableDeclaration {
             identifier: "beverage".to_string(),
-            expression: Some(Expression::Literal(Literal::String("espresso".to_string()))),
+            expression: Some("espresso".to_string().into()),
         };
         let print_statement =
             Statement::Print(Expression::VariableReference("beverage".to_string()));
@@ -959,11 +1006,11 @@ mod tests {
 
         let initial_definition = Statement::VariableDeclaration {
             identifier: "a".to_string(),
-            expression: Some(Expression::Literal(Literal::String("before".to_string()))),
+            expression: Some("before".to_string().into()),
         };
         let subsequent_definition = Statement::VariableDeclaration {
             identifier: "a".to_string(),
-            expression: Some(Expression::Literal(Literal::String("after".to_string()))),
+            expression: Some("after".to_string().into()),
         };
         let print_statement = Statement::Print(Expression::VariableReference("a".to_string()));
 
@@ -1020,11 +1067,11 @@ mod tests {
 
         let define_a = Statement::VariableDeclaration {
             identifier: "a".to_string(),
-            expression: Some(Expression::Literal(Literal::Number(BigDecimal::one()))),
+            expression: Some(BigDecimal::one().into()),
         };
         let define_b = Statement::VariableDeclaration {
             identifier: "b".to_string(),
-            expression: Some(Expression::Literal(Literal::Number(BigDecimal::from(2)))),
+            expression: Some(BigDecimal::from(2).into()),
         };
         let print_statement = Statement::Print(Expression::Binary {
             operator: BinaryOperator::Add,
@@ -1056,11 +1103,11 @@ mod tests {
 
         let define_a = Statement::VariableDeclaration {
             identifier: "a".to_string(),
-            expression: Some(Expression::Literal(BigDecimal::one().into())),
+            expression: Some(BigDecimal::one().into()),
         };
         let print_statement = Statement::Print(Expression::Assignment(
             "a".to_string(),
-            Box::new(Expression::Literal(BigDecimal::from(2).into())),
+            Box::new(BigDecimal::from(2).into()),
         ));
 
         // when
@@ -1078,6 +1125,68 @@ mod tests {
             environment.borrow().get("a"),
             Ok(EvaluationResult::Number(BigDecimal::from(2).into()))
         );
+    }
+
+    #[test]
+    fn then_clause_executed() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let conditional = Statement::If {
+            condition: true.into(),
+            then_branch: Box::new(Statement::Print("then clause".to_string().into())),
+            else_branch: None,
+        };
+
+        // when
+        conditional
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute conditional");
+
+        // then
+        assert_eq!(side_effects.borrow().lines.len(), 1);
+        assert_eq!(side_effects.borrow().lines[0], "then clause");
+    }
+
+    #[test]
+    fn no_clause_executed() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let conditional = Statement::If {
+            condition: false.into(),
+            then_branch: Box::new(Statement::Print("then clause".to_string().into())),
+            else_branch: None,
+        };
+
+        // when
+        conditional
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute conditional");
+
+        // then
+        assert!(side_effects.borrow().lines.is_empty());
+    }
+
+    #[test]
+    fn else_clause_executed() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let conditional = Statement::If {
+            condition: false.into(),
+            then_branch: Box::new(Statement::Print("then clause".to_string().into())),
+            else_branch: Some(Box::new(Statement::Print("else clause".to_string().into()))),
+        };
+
+        // when
+        conditional
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute conditional");
+
+        // then
+        assert_eq!(side_effects.borrow().lines.len(), 1);
+        assert_eq!(side_effects.borrow().lines[0], "else clause");
     }
 
     #[derive(Default)]

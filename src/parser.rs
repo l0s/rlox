@@ -1,8 +1,8 @@
 use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
-    InvalidUnaryOperator, UnclosedGrouping, UnterminatedBlock, UnterminatedStatement,
-    VariableNameExpected,
+    InvalidUnaryOperator, MissingCondition, UnclosedCondition, UnclosedGrouping, UnterminatedBlock,
+    UnterminatedStatement, VariableNameExpected,
 };
 use crate::token::{Token, TokenType};
 
@@ -34,6 +34,10 @@ pub(crate) enum ParseError {
     UnterminatedBlock,
     VariableNameExpected,
     InvalidAssignmentTarget(Token),
+    /// Missing open parenthesis to define conditional
+    MissingCondition,
+    /// Missing close parenthesis after conditional
+    UnclosedCondition,
 }
 
 impl TryFrom<Token> for BinaryOperator {
@@ -134,13 +138,33 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Statement, ParseError> {
-        if self.token_match(&[TokenType::Print]) {
+        if self.token_match(&[TokenType::If]) {
+            self.if_statement()
+        } else if self.token_match(&[TokenType::Print]) {
             self.print_statement()
         } else if self.token_match(&[TokenType::OpenBrace]) {
             self.block()
         } else {
             self.expression_statement()
         }
+    }
+
+    fn if_statement(&mut self) -> Result<Statement, ParseError> {
+        self.consume(&TokenType::OpenParenthesis, MissingCondition)?;
+        let condition = self.expression()?;
+        self.consume(&TokenType::CloseParenthesis, UnclosedCondition)?;
+        let then_branch = Box::new(self.statement()?);
+        let else_branch = if self.token_match(&[TokenType::Else]) {
+            Some(Box::new(self.statement()?))
+        } else {
+            None
+        };
+
+        Ok(Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        })
     }
 
     fn block(&mut self) -> Result<Statement, ParseError> {
@@ -579,6 +603,71 @@ mod tests {
         assert!(
             matches!(result, ParseError::InvalidAssignmentTarget(target) if target.token_type == TokenType::Identifier)
         );
+    }
+
+    #[test]
+    fn else_bound_to_nearest_if() {
+        // given
+        let tokens = [
+            Token::new(TokenType::If, "if".to_string(), 0),
+            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            Token::new(TokenType::True, "true".to_string(), 0),
+            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
+            Token::new(TokenType::If, "if".to_string(), 0),
+            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            Token::new(TokenType::True, "true".to_string(), 0),
+            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
+            Token::new(TokenType::Print, "print".to_string(), 0),
+            Token::new(TokenType::Identifier, "whenTrue".to_string(), 0),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            Token::new(TokenType::Else, "else".to_string(), 0),
+            Token::new(TokenType::Print, "print".to_string(), 0),
+            Token::new(TokenType::Identifier, "whenFalse".to_string(), 0),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse assignment");
+
+        // then
+        assert_eq!(result.len(), 1);
+        let statement = &result[0];
+        assert!(matches!(
+            statement,
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } if matches!(condition, Expression::Literal(Literal::True))
+            && matches!(
+                then_branch.as_ref(),
+                Statement::If {
+                    condition,
+                    then_branch,
+                    else_branch
+                } if matches!(condition, Expression::Literal(Literal::True))
+                && matches!(
+                    then_branch.as_ref(),
+                    Statement::Print(when_true) if matches!(
+                        when_true,
+                        Expression::VariableReference(when_true) if when_true == "whenTrue"
+                    )
+                )
+                && matches!(
+                    else_branch,
+                    Some(else_branch) if matches!(
+                        else_branch.as_ref(),
+                        Statement::Print(when_false) if matches!(
+                            when_false,
+                            Expression::VariableReference(when_false) if when_false == "whenFalse"
+                        )
+                    )
+                )
+            )
+            && else_branch.is_none()
+        ))
     }
 
     impl Token {
