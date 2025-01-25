@@ -204,7 +204,7 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> Result<Expression, ParseError> {
-        let expression = self.equality()?;
+        let expression = self.or()?;
         if self.token_match(&[TokenType::Assignment]) {
             let value = self.assignment()?;
             return if let Expression::VariableReference(name) = expression.clone() {
@@ -214,6 +214,32 @@ impl Parser {
             };
         }
         Ok(expression)
+    }
+
+    /// Parse the expression at the current cursor as a disjunction or an expression with the next
+    /// higher level of precedence. This will advance the cursor on success.
+    fn or(&mut self) -> Result<Expression, ParseError> {
+        let mut result = self.and()?;
+        while self.token_match(&[TokenType::Or]) {
+            result = Expression::Logical {
+                operator: BinaryOperator::Or,
+                left_value: Box::new(result),
+                right_value: Box::new(self.and()?),
+            };
+        }
+        Ok(result)
+    }
+
+    fn and(&mut self) -> Result<Expression, ParseError> {
+        let mut result = self.equality()?;
+        while self.token_match(&[TokenType::And]) {
+            result = Expression::Logical {
+                operator: BinaryOperator::And,
+                left_value: Box::new(result),
+                right_value: Box::new(self.equality()?),
+            };
+        }
+        Ok(result)
     }
 
     fn equality(&mut self) -> Result<Expression, ParseError> {
@@ -325,6 +351,15 @@ impl Parser {
         Err(conditional_error)
     }
 
+    /// Check if the current token matches one of the expected types and if so, advance the cursor
+    ///
+    /// Parameters:
+    /// - `types` - any of the token types to consider a match
+    ///
+    /// Returns:
+    /// - `true` - if the token at the cursor matched one of `types` and the cursor was advanced
+    /// - `false` - if none of the `types` matched the token at the cursor and the cursor was *not*
+    ///   advanced.
     fn token_match(&mut self, types: &[TokenType]) -> bool {
         for token_type in types {
             if self.check(token_type) {
@@ -670,9 +705,119 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn parse_disjunction() {
+        // given
+        let tokens = [
+            Token::new(TokenType::Print, "print".to_string(), 0),
+            Token::from("hi".to_string()),
+            Token::new(TokenType::Or, "or".to_string(), 0),
+            Token::from(2u8),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse assignment");
+
+        // then
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Statement::Print(expression)
+            if matches!(
+                expression,
+                Expression::Logical {
+                    operator,
+                    left_value,
+                    right_value,
+                }
+                if operator == &BinaryOperator::Or
+                && matches!(
+                    left_value.as_ref(),
+                    Expression::Literal(left_value)
+                    if matches!(
+                        left_value,
+                        Literal::String(left_value)
+                        if left_value == "hi"
+                    )
+                )
+                && matches!(
+                    right_value.as_ref(),
+                    Expression::Literal(right_value)
+                    if matches!(
+                        right_value,
+                        Literal::Number(right_value)
+                        if right_value == &BigDecimal::from(2u8)
+                    )
+                )
+            )
+        ))
+    }
+
+    #[test]
+    fn parse_conjunction() {
+        // given
+        let tokens = [
+            Token::new(TokenType::Print, "print".to_string(), 0),
+            Token::new(TokenType::Nil, "nil".to_string(), 0),
+            Token::new(TokenType::And, "and".to_string(), 0),
+            Token::from("hi".to_string()),
+            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse assignment");
+
+        // then
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Statement::Print(expression)
+            if matches!(
+                expression,
+                Expression::Logical {
+                    operator,
+                    left_value,
+                    right_value,
+                }
+                if operator == &BinaryOperator::And
+                && matches!(
+                    left_value.as_ref(),
+                    Expression::Literal(left_value)
+                    if matches!(left_value, Literal::Nil)
+                )
+                && matches!(
+                    right_value.as_ref(),
+                    Expression::Literal(right_value)
+                    if matches!(
+                        right_value,
+                        Literal::String(right_value)
+                        if right_value == "hi"
+                    )
+                )
+            )
+        ))
+    }
+
     impl Token {
         fn new_int(int: u8) -> Self {
             Self::new_number(format!("{}", int), BigDecimal::from(int), 0)
+        }
+    }
+
+    impl From<String> for Token {
+        fn from(value: String) -> Self {
+            Self::new_string(format!("\"{}\"", &value), value, 0)
+        }
+    }
+
+    impl From<u8> for Token {
+        fn from(value: u8) -> Self {
+            Self::new_int(value)
         }
     }
 }
