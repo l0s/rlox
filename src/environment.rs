@@ -72,11 +72,6 @@ impl Environment {
         }
     }
 
-    /// Check if a variable has been defined in either the local scope or any parent scope
-    pub fn exists(&self, name: &str) -> bool {
-        self.get(name).is_ok()
-    }
-
     pub fn new_nested_scope(parent: Rc<RefCell<Self>>) -> Self {
         Self {
             parent: Some(parent),

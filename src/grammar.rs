@@ -4,7 +4,7 @@ use bigdecimal::{BigDecimal, Zero};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
-use std::ops::Neg;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::rc::Rc;
 use std::str::FromStr;
 use EvaluationError::{DivideByZero, NilValue, TypeMismatch, Undefined};
@@ -100,8 +100,9 @@ impl Statement {
                 else_branch,
             } => {
                 if condition
-                    .evaluate_boolean(&mut environment.borrow_mut())
+                    .evaluate(&mut environment.borrow_mut())
                     .map_err(ExecutionError::Evaluation)?
+                    .is_truthful()
                 {
                     then_branch.execute(environment.clone(), side_effects.clone())
                 } else if let Some(else_branch) = else_branch {
@@ -118,6 +119,11 @@ impl Statement {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Expression {
     Literal(Literal),
+    Logical {
+        operator: BinaryOperator,
+        left_value: Box<Expression>,
+        right_value: Box<Expression>,
+    },
     Unary(UnaryOperator, Box<Expression>),
     Binary {
         operator: BinaryOperator,
@@ -130,173 +136,36 @@ pub(crate) enum Expression {
     Assignment(String, Box<Expression>),
 }
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub(crate) enum ResultType {
-    /// The expression will be non-nil and has a result type
-    Some(DataType),
-    /// The expression will evaluate to Nil and therefore has no result type
-    None,
-    /// No result type can be determined because the expression refers to an undefined variable
-    Undefined,
-}
-
 impl Expression {
     pub fn evaluate(
         &self,
         environment: &mut Environment,
     ) -> Result<EvaluationResult, EvaluationError> {
-        match self.result_type(environment) {
-            ResultType::None => Ok(EvaluationResult::Nil),
-            ResultType::Some(data_type) => data_type.evaluate(self, environment),
-            ResultType::Undefined => Err(Undefined),
-        }
-    }
-
-    pub fn result_type(&self, environment: &Environment) -> ResultType {
         match self {
-            Self::Literal(literal) => match literal {
-                Literal::Number(_) => ResultType::Some(DataType::Number),
-                Literal::String(_) => ResultType::Some(DataType::String),
-                Literal::True | Literal::False => ResultType::Some(DataType::Boolean),
-                Literal::Nil => ResultType::None,
-            },
-            Self::Unary(operator, expression) => operator.result_type(environment, expression),
-            Self::Binary {
+            Expression::Literal(literal) => Ok(literal.clone().into()),
+            Expression::Logical {
                 operator,
                 left_value,
                 right_value,
-            } => operator.result_type(environment, left_value, right_value),
-            Self::Grouping(expression) => expression.result_type(environment),
-            Self::VariableReference(name) => {
+            } => operator.evaluate(environment, left_value, right_value),
+            Expression::Unary(operator, operand) => operator.evaluate(environment, operand),
+            Expression::Binary {
+                operator,
+                left_value,
+                right_value,
+            } => operator.evaluate(environment, left_value, right_value),
+            Expression::Grouping(expression) => expression.evaluate(environment),
+            Expression::VariableReference(name) => {
                 if let Ok(value) = environment.get(name) {
-                    if let Some(data_type) = value.data_type() {
-                        ResultType::Some(data_type)
-                    } else {
-                        ResultType::None
-                    }
+                    Ok(value)
                 } else {
-                    ResultType::Undefined
+                    Err(Undefined)
                 }
             }
-            Self::Assignment(_, expression) => expression.result_type(environment),
-        }
-    }
-
-    pub fn evaluate_boolean(&self, environment: &mut Environment) -> Result<bool, EvaluationError> {
-        match self {
-            Self::Literal(literal) => match literal {
-                Literal::False | Literal::Nil => Ok(false),
-                _ => Ok(true),
-            },
-            Self::Unary(operator, argument) => {
-                if *operator == UnaryOperator::Not {
-                    argument.evaluate_boolean(environment).map(|result| !result)
-                } else {
-                    Err(TypeMismatch)
-                }
-            }
-            Self::Binary {
-                operator,
-                left_value,
-                right_value,
-            } => operator.evaluate_boolean(environment, left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_boolean(environment),
-            Self::VariableReference(name) => {
-                if let Ok(value) = environment.get(name) {
-                    match value {
-                        EvaluationResult::Number(_) | EvaluationResult::String(_) => Ok(true),
-                        EvaluationResult::Boolean(value) => Ok(value),
-                        EvaluationResult::Nil => Ok(false),
-                    }
-                } else {
-                    Ok(false)
-                }
-            }
-            Self::Assignment(identifier, expression) => {
-                let result = expression.evaluate_boolean(environment)?;
+            Expression::Assignment(identifier, expression) => {
+                let result = expression.evaluate(environment)?;
                 environment
-                    .assign(identifier.clone(), EvaluationResult::Boolean(result))
-                    .map_err(|_| Undefined)?;
-                Ok(result)
-            }
-        }
-    }
-
-    pub fn evaluate_number(
-        &self,
-        environment: &mut Environment,
-    ) -> Result<BigDecimal, EvaluationError> {
-        match self {
-            Self::Literal(literal) => match literal {
-                Literal::Number(number) => Ok(number.clone()),
-                Literal::Nil => Err(NilValue),
-                _ => Err(TypeMismatch),
-            },
-            Self::Unary(operator, argument) => {
-                if *operator == UnaryOperator::Negative {
-                    argument.evaluate_number(environment).map(BigDecimal::neg)
-                } else {
-                    Err(TypeMismatch)
-                }
-            }
-            Self::Binary {
-                operator,
-                left_value,
-                right_value,
-            } => operator.evaluate_number(environment, left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_number(environment),
-            Self::VariableReference(name) => {
-                if let Ok(value) = environment.get(name) {
-                    if let EvaluationResult::Number(value) = value {
-                        Ok(value.clone())
-                    } else {
-                        Err(TypeMismatch)
-                    }
-                } else {
-                    Err(NilValue)
-                }
-            }
-            Self::Assignment(identifier, expression) => {
-                let result = expression.evaluate_number(environment)?;
-                environment
-                    .assign(identifier.clone(), EvaluationResult::Number(result.clone()))
-                    .map_err(|_| Undefined)?;
-                Ok(result)
-            }
-        }
-    }
-
-    pub fn evaluate_string(
-        &self,
-        environment: &mut Environment,
-    ) -> Result<String, EvaluationError> {
-        match self {
-            Self::Literal(literal) => match literal {
-                Literal::String(value) => Ok(value.clone()),
-                Literal::Nil => Err(NilValue),
-                _ => Err(TypeMismatch),
-            },
-            Self::Unary(_, _) => Err(TypeMismatch),
-            Self::Binary {
-                operator,
-                left_value,
-                right_value,
-            } => operator.evaluate_string(environment, left_value, right_value),
-            Self::Grouping(expression) => expression.evaluate_string(environment),
-            Self::VariableReference(name) => match environment.get(name) {
-                Ok(value) => {
-                    if let EvaluationResult::String(value) = value {
-                        Ok(value.clone())
-                    } else {
-                        Err(TypeMismatch)
-                    }
-                }
-                Err(_) => Err(Undefined),
-            },
-            Self::Assignment(identifier, expression) => {
-                let result = expression.evaluate_string(environment)?;
-                environment
-                    .assign(identifier.clone(), EvaluationResult::String(result.clone()))
+                    .assign(identifier.clone(), result.clone())
                     .map_err(|_| Undefined)?;
                 Ok(result)
             }
@@ -313,6 +182,21 @@ impl Debug for Expression {
                 Literal::True => f.write_str("true"),
                 Literal::False => f.write_str("false"),
                 Literal::Nil => f.write_str("nil"),
+            },
+            Self::Logical {
+                operator,
+                left_value,
+                right_value,
+            } => match operator {
+                BinaryOperator::And => {
+                    write!(f, "( AND {:?} {:?} )", left_value, right_value)
+                }
+                BinaryOperator::Or => {
+                    write!(f, "( OR {:?} {:?} )", left_value, right_value)
+                }
+                _ => {
+                    write!(f, "(Invalid Logical Operator {:?})", operator)
+                }
             },
             Self::Unary(operator, expression) => match operator {
                 UnaryOperator::Negative => write!(f, "(- {:?})", expression),
@@ -334,6 +218,8 @@ impl Debug for Expression {
                     BinaryOperator::Subtract => "-",
                     BinaryOperator::Multiply => "*",
                     BinaryOperator::Divide => "/",
+                    BinaryOperator::And => "AND",
+                    BinaryOperator::Or => "OR",
                 };
                 write!(f, "({} {:?} {:?})", symbol, left_value, right_value)
             }
@@ -367,64 +253,132 @@ pub(crate) enum BinaryOperator {
     Subtract,
     Multiply,
     Divide,
+    /// Conjunction
+    And,
+    /// Disjunction
+    Or,
 }
 
 impl BinaryOperator {
-    pub fn evaluate_boolean(
+    pub fn evaluate(
         &self,
         environment: &mut Environment,
         left_value: &Expression,
         right_value: &Expression,
-    ) -> Result<bool, EvaluationError> {
+    ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            Self::Equal => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, ResultType::None) => Ok(true),
-                    (ResultType::None, ResultType::Some(_))
-                    | (ResultType::Some(_), ResultType::None) => Ok(false),
-                    (ResultType::Some(DataType::String), ResultType::Some(DataType::String)) => {
-                        Ok(left_value.evaluate_string(environment)?
-                            == right_value.evaluate_string(environment)?)
-                    }
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            == right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(DataType::Boolean), ResultType::Some(DataType::Boolean)) => {
-                        Ok(left_value.evaluate_boolean(environment)?
-                            == right_value.evaluate_boolean(environment)?)
-                    }
-                    _ => Ok(false), // two different types, cannot be equal to each other
-                }
+            BinaryOperator::Equal => Ok(EvaluationResult::Boolean(
+                left_value.evaluate(environment)? == right_value.evaluate(environment)?,
+            )),
+            BinaryOperator::NotEqual => Ok(EvaluationResult::Boolean(
+                left_value.evaluate(environment)? != right_value.evaluate(environment)?,
+            )),
+            BinaryOperator::LessThan => {
+                Self::evaluate_inequality(environment, left_value, right_value, &[Ordering::Less])
             }
-            Self::NotEqual => Self::Equal
-                .evaluate_boolean(environment, left_value, right_value)
-                .map(|result| !result),
-            Self::LessThan => {
-                Self::evaluate_inequality(environment, left_value, &right_value, &[Ordering::Less])
-            }
-            Self::GreaterThan => Self::evaluate_inequality(
+            BinaryOperator::GreaterThan => Self::evaluate_inequality(
                 environment,
                 left_value,
-                &right_value,
+                right_value,
                 &[Ordering::Greater],
             ),
-            Self::LessThanOrEqual => Self::evaluate_inequality(
+            BinaryOperator::LessThanOrEqual => Self::evaluate_inequality(
                 environment,
                 left_value,
-                &right_value,
+                right_value,
                 &[Ordering::Less, Ordering::Equal],
             ),
-            Self::GreaterThanOrEqual => Self::evaluate_inequality(
+            BinaryOperator::GreaterThanOrEqual => Self::evaluate_inequality(
                 environment,
                 left_value,
-                &right_value,
+                right_value,
                 &[Ordering::Greater, Ordering::Equal],
             ),
-            _ => Err(TypeMismatch),
+            BinaryOperator::Add => {
+                let left = left_value.evaluate(environment)?;
+                let right = right_value.evaluate(environment)?;
+                fn as_string(evaluation_result: &EvaluationResult) -> String {
+                    // Note: this logic differs from `Display`
+                    match evaluation_result {
+                        EvaluationResult::Number(value) => value.to_engineering_notation(),
+                        EvaluationResult::String(value) => value.to_string(),
+                        EvaluationResult::Boolean(value) => value.to_string(),
+                        EvaluationResult::Nil => "".to_string(),
+                    }
+                }
+                match (left, right) {
+                    // If both numbers, perform addition
+                    (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
+                        Ok(EvaluationResult::Number(x.add(y)))
+                    }
+                    // If either is a string, concatenate
+                    (EvaluationResult::String(prefix), suffix) => Ok(EvaluationResult::String(
+                        format!("{}{}", prefix, as_string(&suffix)),
+                    )),
+                    (prefix, EvaluationResult::String(suffix)) => Ok(EvaluationResult::String(
+                        format!("{}{}", as_string(&prefix), suffix),
+                    )),
+                    (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
+                    (_, _) => Err(TypeMismatch),
+                }
+            }
+            BinaryOperator::Subtract => {
+                Self::perform_arithmetic(environment, left_value, right_value, |x, y| x.sub(y))
+            }
+            BinaryOperator::Multiply => {
+                Self::perform_arithmetic(environment, left_value, right_value, |x, y| x.mul(y))
+            }
+            BinaryOperator::Divide => {
+                let left = left_value.evaluate(environment)?;
+                let right = right_value.evaluate(environment)?;
+                match (left, right) {
+                    (
+                        EvaluationResult::Number(numerator),
+                        EvaluationResult::Number(denominator),
+                    ) => {
+                        if denominator == BigDecimal::zero() {
+                            Err(DivideByZero)
+                        } else {
+                            Ok(EvaluationResult::Number(numerator.div(denominator)))
+                        }
+                    }
+                    (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
+                    (_, _) => Err(TypeMismatch),
+                }
+            }
+            BinaryOperator::And => {
+                let left = left_value.evaluate(environment)?;
+                if !left.is_truthful() {
+                    Ok(left)
+                } else {
+                    Ok(right_value.evaluate(environment)?)
+                }
+            }
+            BinaryOperator::Or => {
+                let left = left_value.evaluate(environment)?;
+                if left.is_truthful() {
+                    Ok(left)
+                } else {
+                    Ok(right_value.evaluate(environment)?)
+                }
+            }
+        }
+    }
+
+    fn perform_arithmetic(
+        environment: &mut Environment,
+        left_value: &Expression,
+        right_value: &Expression,
+        operation: fn(BigDecimal, BigDecimal) -> BigDecimal,
+    ) -> Result<EvaluationResult, EvaluationError> {
+        let left = left_value.evaluate(environment)?;
+        let right = right_value.evaluate(environment)?;
+        match (left, right) {
+            (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
+                Ok(EvaluationResult::Number(operation(x, y)))
+            }
+            (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
+            (_, _) => Err(TypeMismatch),
         }
     }
 
@@ -433,115 +387,17 @@ impl BinaryOperator {
         left_value: &Expression,
         right_value: &Expression,
         expected: &[Ordering],
-    ) -> Result<bool, EvaluationError> {
+    ) -> Result<EvaluationResult, EvaluationError> {
         match (
-            left_value.result_type(environment),
-            right_value.result_type(environment),
+            left_value.evaluate(environment)?,
+            right_value.evaluate(environment)?,
         ) {
-            (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
-            (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                Ok(expected.contains(
-                    &left_value
-                        .evaluate_number(environment)?
-                        .cmp(&right_value.evaluate_number(environment)?),
-                ))
+            // TODO will this fail early (short circuit) if one of these is NaN?
+            (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
+                Ok(EvaluationResult::Boolean(expected.contains(&x.cmp(&y))))
             }
-            (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
-            (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
-        }
-    }
-
-    pub fn evaluate_number(
-        &self,
-        environment: &mut Environment,
-        left_value: &Expression,
-        right_value: &Expression,
-    ) -> Result<BigDecimal, EvaluationError> {
-        match self {
-            Self::Add => Ok(left_value.evaluate_number(environment)?
-                + right_value.evaluate_number(environment)?),
-            Self::Subtract => Ok(left_value.evaluate_number(environment)?
-                - right_value.evaluate_number(environment)?),
-            Self::Multiply => Ok(left_value.evaluate_number(environment)?
-                * right_value.evaluate_number(environment)?),
-            Self::Divide => {
-                let right_value = right_value.evaluate_number(environment)?;
-                if right_value.is_zero() {
-                    Err(DivideByZero)
-                } else {
-                    Ok(left_value.evaluate_number(environment)? / right_value)
-                }
-            }
-            _ => Err(TypeMismatch),
-        }
-    }
-
-    pub fn evaluate_string(
-        &self,
-        environment: &mut Environment,
-        left_value: &Expression,
-        right_value: &Expression,
-    ) -> Result<String, EvaluationError> {
-        if self == &Self::Add {
-            let left_type = left_value.result_type(environment);
-            let right_type = right_value.result_type(environment);
-            return if left_type == ResultType::Some(DataType::String)
-                || right_type == ResultType::Some(DataType::String)
-            {
-                let mut convert_to_string = |expression: &Expression,
-                                             data_type: ResultType|
-                 -> Result<String, EvaluationError> {
-                    Ok(match data_type {
-                        ResultType::None => "".to_string(),
-                        ResultType::Some(value) => match value {
-                            DataType::Number => expression
-                                .evaluate_number(environment)?
-                                .to_engineering_notation(),
-                            DataType::String => expression.evaluate_string(environment)?,
-                            DataType::Boolean => {
-                                expression.evaluate_boolean(environment)?.to_string()
-                            }
-                        },
-                        ResultType::Undefined => Err(Undefined)?,
-                    })
-                };
-
-                let left_string = convert_to_string(left_value, left_type)?;
-                let right_string = convert_to_string(right_value, right_type)?;
-                Ok(format!("{}{}", left_string, right_string))
-            } else {
-                Err(NilValue)
-            };
-        }
-        // none of the other binary operators produce string results
-        Err(TypeMismatch)
-    }
-
-    pub fn result_type(
-        &self,
-        environment: &Environment,
-        left_value: &Expression,
-        right_value: &Expression,
-    ) -> ResultType {
-        match self {
-            Self::Equal => ResultType::Some(DataType::Boolean),
-            Self::NotEqual => ResultType::Some(DataType::Boolean),
-            Self::LessThan => ResultType::Some(DataType::Boolean),
-            Self::GreaterThan => ResultType::Some(DataType::Boolean),
-            Self::LessThanOrEqual => ResultType::Some(DataType::Boolean),
-            Self::GreaterThanOrEqual => ResultType::Some(DataType::Boolean),
-            Self::Add => {
-                if (*left_value).result_type(environment) == ResultType::Some(DataType::String)
-                    || (*right_value).result_type(environment) == ResultType::Some(DataType::String)
-                {
-                    ResultType::Some(DataType::String)
-                } else {
-                    ResultType::Some(DataType::Number)
-                }
-            }
-            Self::Subtract => ResultType::Some(DataType::Number),
-            Self::Multiply => ResultType::Some(DataType::Number),
-            Self::Divide => ResultType::Some(DataType::Number),
+            (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
+            (_, _) => Err(TypeMismatch),
         }
     }
 }
@@ -553,10 +409,24 @@ pub(crate) enum UnaryOperator {
 }
 
 impl UnaryOperator {
-    pub fn result_type(&self, _environment: &Environment, _input: &Expression) -> ResultType {
+    pub fn evaluate(
+        &self,
+        environment: &mut Environment,
+        input: &Expression,
+    ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            UnaryOperator::Negative => ResultType::Some(DataType::Number),
-            UnaryOperator::Not => ResultType::Some(DataType::Boolean),
+            UnaryOperator::Negative => {
+                let operand = input.evaluate(environment)?;
+                if let EvaluationResult::Number(operand) = operand {
+                    Ok(EvaluationResult::Number(operand.neg()))
+                } else {
+                    Err(TypeMismatch)
+                }
+            }
+            UnaryOperator::Not => {
+                let operand = input.evaluate(environment)?;
+                Ok(EvaluationResult::Boolean(!operand.is_truthful()))
+            }
         }
     }
 }
@@ -568,6 +438,18 @@ pub(crate) enum Literal {
     True,
     False,
     Nil,
+}
+
+impl From<Literal> for EvaluationResult {
+    fn from(value: Literal) -> Self {
+        match value {
+            Literal::Number(value) => EvaluationResult::Number(value),
+            Literal::String(value) => EvaluationResult::String(value),
+            Literal::True => EvaluationResult::Boolean(true),
+            Literal::False => EvaluationResult::Boolean(false),
+            Literal::Nil => EvaluationResult::Nil,
+        }
+    }
 }
 
 impl FromStr for Literal {
@@ -632,50 +514,12 @@ impl From<Literal> for Expression {
     }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub(crate) enum DataType {
-    Number,
-    String,
-    Boolean,
-}
-
-impl DataType {
-    pub fn evaluate(
-        &self,
-        expression: &Expression,
-        environment: &mut Environment,
-    ) -> Result<EvaluationResult, EvaluationError> {
-        match self {
-            Self::Number => Ok(EvaluationResult::Number(
-                expression.evaluate_number(environment)?,
-            )),
-            Self::String => Ok(EvaluationResult::String(
-                expression.evaluate_string(environment)?,
-            )),
-            Self::Boolean => Ok(EvaluationResult::Boolean(
-                expression.evaluate_boolean(environment)?,
-            )),
-        }
-    }
-}
-
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) enum EvaluationResult {
     Number(BigDecimal),
     String(String),
     Boolean(bool),
     Nil,
-}
-
-impl EvaluationResult {
-    fn data_type(&self) -> Option<DataType> {
-        match self {
-            Self::Number(_) => Some(DataType::Number),
-            Self::String(_) => Some(DataType::String),
-            Self::Boolean(_) => Some(DataType::Boolean),
-            Self::Nil => None,
-        }
-    }
 }
 
 impl Display for EvaluationResult {
@@ -685,6 +529,17 @@ impl Display for EvaluationResult {
             Self::String(value) => f.write_str(value),
             Self::Boolean(value) => write!(f, "{}", value),
             Self::Nil => f.write_str("nil"),
+        }
+    }
+}
+
+impl EvaluationResult {
+    fn is_truthful(&self) -> bool {
+        match self {
+            EvaluationResult::Number(_) => true,
+            EvaluationResult::String(_) => true,
+            EvaluationResult::Boolean(value) => *value,
+            EvaluationResult::Nil => false,
         }
     }
 }
