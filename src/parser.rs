@@ -1,9 +1,10 @@
-use crate::grammar::{BinaryOperator, Expression, Literal, Statement, UnaryOperator};
+use crate::grammar::{BinaryOperator, Expression, Literal, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
     InvalidUnaryOperator, MissingCondition, UnclosedCondition, UnclosedGrouping, UnterminatedBlock,
     UnterminatedStatement, VariableNameExpected,
 };
+use crate::statement::Statement;
 use crate::token::{Token, TokenType};
 
 #[derive(Debug)]
@@ -21,19 +22,19 @@ impl From<Vec<Token>> for Parser {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ParseError {
-    InvalidBinaryOperator(Token),
-    InvalidUnaryOperator(Token),
-    InvalidPrimaryToken(Option<TokenType>),
-    InvalidLiteral(Token),
+    InvalidBinaryOperator,
+    InvalidUnaryOperator,
+    InvalidPrimaryToken,
+    InvalidLiteral,
     UnclosedGrouping,
     /// Statement is missing a semicolon
     UnterminatedStatement(Option<Expression>),
     /// Block is missing the closing brace
     UnterminatedBlock,
     VariableNameExpected,
-    InvalidAssignmentTarget(Token),
+    InvalidAssignmentTarget,
     /// Missing open parenthesis to define conditional
     MissingCondition,
     /// Missing close parenthesis after conditional
@@ -55,7 +56,7 @@ impl TryFrom<Token> for BinaryOperator {
             TokenType::GreaterThanOrEqual => Ok(BinaryOperator::GreaterThanOrEqual),
             TokenType::LessThan => Ok(BinaryOperator::LessThan),
             TokenType::LessThanOrEqual => Ok(BinaryOperator::LessThanOrEqual),
-            _ => Err(InvalidBinaryOperator(value)),
+            _ => Err(InvalidBinaryOperator),
         }
     }
 }
@@ -67,7 +68,7 @@ impl TryFrom<Token> for UnaryOperator {
         match value.token_type {
             TokenType::Not => Ok(UnaryOperator::Not),
             TokenType::Minus => Ok(UnaryOperator::Negative),
-            _ => Err(InvalidUnaryOperator(value)),
+            _ => Err(InvalidUnaryOperator),
         }
     }
 }
@@ -86,7 +87,7 @@ impl TryFrom<Token> for Literal {
             TokenType::False => Ok(Literal::False),
             TokenType::True => Ok(Literal::True),
             TokenType::Nil => Ok(Literal::Nil),
-            _ => Err(InvalidLiteral(value)),
+            _ => Err(InvalidLiteral),
         }
     }
 }
@@ -210,7 +211,7 @@ impl Parser {
             return if let Expression::VariableReference(name) = expression.clone() {
                 Ok(Expression::Assignment(name, Box::new(value)))
             } else {
-                Err(InvalidAssignmentTarget(self.previous().clone()))
+                Err(InvalidAssignmentTarget)
             };
         }
         Ok(expression)
@@ -334,9 +335,7 @@ impl Parser {
                 self.previous().lexeme.clone(),
             ))
         } else {
-            Err(InvalidPrimaryToken(
-                self.peek().map(|token| token.token_type),
-            ))
+            Err(InvalidPrimaryToken)
         }
     }
 
@@ -431,7 +430,8 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::{ParseError, Parser};
-    use crate::grammar::{BinaryOperator, Expression, Literal, Statement};
+    use crate::grammar::{BinaryOperator, Expression, Literal};
+    use crate::statement::Statement;
     use crate::token::{Token, TokenType};
     use bigdecimal::{BigDecimal, One};
     use std::ops::Deref;
@@ -576,7 +576,7 @@ mod tests {
             Token::new(TokenType::Semicolon, ";".to_string(), 0),
         ]
         .to_vec();
-        let mut parser: Parser = tokens.into();
+        let parser: Parser = tokens.into();
 
         // when
         let result: Vec<Statement> = parser.try_into().expect("Unable to parse assignment");
@@ -611,9 +611,7 @@ mod tests {
             .expect_err("Expected parse error");
 
         // then
-        assert!(
-            matches!(result, ParseError::InvalidAssignmentTarget(target) if target.token_type == TokenType::NumberLiteral)
-        );
+        assert_eq!(result, ParseError::InvalidAssignmentTarget);
     }
 
     #[test]
@@ -635,9 +633,7 @@ mod tests {
             .expect_err("Expected parse error");
 
         // then
-        assert!(
-            matches!(result, ParseError::InvalidAssignmentTarget(target) if target.token_type == TokenType::Identifier)
-        );
+        assert_eq!(result, ParseError::InvalidAssignmentTarget);
     }
 
     #[test]

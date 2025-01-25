@@ -1,10 +1,11 @@
 use crate::environment::Environment;
-use crate::grammar::{EvaluationError, EvaluationResult, ExecutionError, Expression, Statement};
+use crate::grammar::{EvaluationError, EvaluationResult, Expression};
 use crate::interpreter::InterpreterError::Execution;
 use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
 use crate::scanner::Scanner;
 use crate::side_effects::{SideEffects, StandardSideEffects};
+use crate::statement::{ExecutionError, Statement};
 use crate::token::Token;
 use std::cell::RefCell;
 use std::rc::Rc;

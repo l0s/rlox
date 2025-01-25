@@ -5,6 +5,7 @@ mod lexical_error;
 mod parser;
 mod scanner;
 mod side_effects;
+mod statement;
 mod token;
 
 use std::cell::RefCell;
