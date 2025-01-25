@@ -2,6 +2,7 @@ use crate::environment::{Environment, ExistsError};
 use crate::side_effects::SideEffects;
 use bigdecimal::{BigDecimal, Zero};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Neg;
 use std::rc::Rc;
@@ -137,12 +138,6 @@ pub(crate) enum ResultType {
     None,
     /// No result type can be determined because the expression refers to an undefined variable
     Undefined,
-}
-
-impl ResultType {
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
 }
 
 impl Expression {
@@ -405,86 +400,54 @@ impl BinaryOperator {
                     _ => Ok(false), // two different types, cannot be equal to each other
                 }
             }
-            Self::NotEqual => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, ResultType::None) => Ok(false),
-                    (ResultType::None, ResultType::Some(_))
-                    | (ResultType::Some(_), ResultType::None) => Ok(true),
-                    (ResultType::Some(DataType::String), ResultType::Some(DataType::String)) => {
-                        Ok(left_value.evaluate_string(environment)?
-                            != right_value.evaluate_string(environment)?)
-                    }
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            != right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(DataType::Boolean), ResultType::Some(DataType::Boolean)) => {
-                        Ok(left_value.evaluate_boolean(environment)?
-                            != right_value.evaluate_boolean(environment)?)
-                    }
-                    _ => Ok(true), // two different types, cannot be equal to each other
-                }
-            }
+            Self::NotEqual => Self::Equal
+                .evaluate_boolean(environment, left_value, right_value)
+                .map(|result| !result),
             Self::LessThan => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            < right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
-                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
-                }
+                Self::evaluate_inequality(environment, left_value, &right_value, &[Ordering::Less])
             }
-            Self::GreaterThan => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            > right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
-                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
-                }
-            }
-            Self::LessThanOrEqual => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            <= right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
-                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
-                }
-            }
-            Self::GreaterThanOrEqual => {
-                match (
-                    left_value.result_type(environment),
-                    right_value.result_type(environment),
-                ) {
-                    (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
-                    (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
-                        Ok(left_value.evaluate_number(environment)?
-                            >= right_value.evaluate_number(environment)?)
-                    }
-                    (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
-                    (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
-                }
-            }
+            Self::GreaterThan => Self::evaluate_inequality(
+                environment,
+                left_value,
+                &right_value,
+                &[Ordering::Greater],
+            ),
+            Self::LessThanOrEqual => Self::evaluate_inequality(
+                environment,
+                left_value,
+                &right_value,
+                &[Ordering::Less, Ordering::Equal],
+            ),
+            Self::GreaterThanOrEqual => Self::evaluate_inequality(
+                environment,
+                left_value,
+                &right_value,
+                &[Ordering::Greater, Ordering::Equal],
+            ),
             _ => Err(TypeMismatch),
+        }
+    }
+
+    fn evaluate_inequality(
+        environment: &mut Environment,
+        left_value: &Expression,
+        right_value: &Expression,
+        expected: &[Ordering],
+    ) -> Result<bool, EvaluationError> {
+        match (
+            left_value.result_type(environment),
+            right_value.result_type(environment),
+        ) {
+            (ResultType::None, _) | (_, ResultType::None) => Err(NilValue),
+            (ResultType::Some(DataType::Number), ResultType::Some(DataType::Number)) => {
+                Ok(expected.contains(
+                    &left_value
+                        .evaluate_number(environment)?
+                        .cmp(&right_value.evaluate_number(environment)?),
+                ))
+            }
+            (ResultType::Some(_), ResultType::Some(_)) => Err(TypeMismatch), // both values must be numbers
+            (ResultType::Undefined, _) | (_, ResultType::Undefined) => Err(Undefined),
         }
     }
 
@@ -522,7 +485,7 @@ impl BinaryOperator {
         if self == &Self::Add {
             let left_type = left_value.result_type(environment);
             let right_type = right_value.result_type(environment);
-            if left_type == ResultType::Some(DataType::String)
+            return if left_type == ResultType::Some(DataType::String)
                 || right_type == ResultType::Some(DataType::String)
             {
                 let mut convert_to_string = |expression: &Expression,
@@ -545,10 +508,10 @@ impl BinaryOperator {
 
                 let left_string = convert_to_string(left_value, left_type)?;
                 let right_string = convert_to_string(right_value, right_type)?;
-                return Ok(format!("{}{}", left_string, right_string));
-            } else if left_type.is_none() && right_type.is_none() {
-                return Err(NilValue);
-            }
+                Ok(format!("{}{}", left_string, right_string))
+            } else {
+                Err(NilValue)
+            };
         }
         // none of the other binary operators produce string results
         Err(TypeMismatch)
@@ -579,23 +542,6 @@ impl BinaryOperator {
             Self::Subtract => ResultType::Some(DataType::Number),
             Self::Multiply => ResultType::Some(DataType::Number),
             Self::Divide => ResultType::Some(DataType::Number),
-        }
-    }
-}
-
-impl Display for BinaryOperator {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Equal => f.write_str("Equal"),
-            Self::NotEqual => f.write_str("NotEqual"),
-            Self::LessThan => f.write_str("LessThan"),
-            Self::GreaterThan => f.write_str("GreaterThan"),
-            Self::LessThanOrEqual => f.write_str("LessThanOrEqual"),
-            Self::GreaterThanOrEqual => f.write_str("GreaterThanOrEqual"),
-            Self::Add => f.write_str("Add"),
-            Self::Subtract => f.write_str("Subtract"),
-            Self::Multiply => f.write_str("Multiply"),
-            Self::Divide => f.write_str("Divide"),
         }
     }
 }
@@ -680,6 +626,12 @@ impl From<bool> for Expression {
     }
 }
 
+impl From<Literal> for Expression {
+    fn from(value: Literal) -> Self {
+        Self::Literal(value)
+    }
+}
+
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub(crate) enum DataType {
     Number,
@@ -739,17 +691,20 @@ impl Display for EvaluationResult {
 
 #[cfg(test)]
 mod tests {
-    use super::BinaryOperator::{Add, Divide, Equal, LessThan, Multiply};
+    use super::BinaryOperator::{
+        Add, Divide, Equal, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Multiply,
+        NotEqual, Subtract,
+    };
     use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
     use super::Literal::Nil;
     use super::{
-        BinaryOperator, EvaluationError, EvaluationResult, ExecutionError, Expression, Literal,
-        Statement, UnaryOperator,
+        EvaluationError, EvaluationResult, ExecutionError, Expression, Statement, UnaryOperator,
     };
     use crate::environment::Environment;
     use crate::side_effects::{SideEffects, StandardSideEffects};
-    use bigdecimal::{BigDecimal, One, Zero};
+    use bigdecimal::{BigDecimal, FromPrimitive, One, Zero};
     use std::cell::RefCell;
+    use std::ops::{Neg, Sub};
     use std::rc::Rc;
     use std::str::FromStr;
 
@@ -841,6 +796,62 @@ mod tests {
             },
             EvaluationResult::Boolean(true),
         ),
+        pi_lte_tau: (
+            Expression::Binary {
+                operator: LessThanOrEqual,
+                left_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
+                right_value: Box::new(BigDecimal::from_str("6.283185307179586").unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        tau_greater_than_pi: (
+            Expression::Binary {
+                operator: GreaterThan,
+                left_value: Box::new(BigDecimal::from_str("6.283185307179586").unwrap().into()),
+                right_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        tau_gte_pi: (
+            Expression::Binary {
+                operator: GreaterThanOrEqual,
+                left_value: Box::new(BigDecimal::from_str("6.283185307179586").unwrap().into()),
+                right_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        e_equals_e: (
+            Expression::Binary {
+                operator: Equal,
+                left_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+                right_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        e_lte_e: (
+            Expression::Binary {
+                operator: LessThanOrEqual,
+                left_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+                right_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        e_gte_e: (
+            Expression::Binary {
+                operator: GreaterThanOrEqual,
+                left_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+                right_value: Box::new(BigDecimal::from_f64(std::f64::consts::E).unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        number_inequality: (
+            Expression::Binary {
+                operator: NotEqual,
+                left_value: Box::new(BigDecimal::from_f64(std::f64::consts::LN_2).unwrap().into()),
+                right_value: Box::new(BigDecimal::from_f64(std::f64::consts::SQRT_2).unwrap().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
         string_not_equal_to_number: (
             Expression::Binary {
                 operator: Equal,
@@ -848,6 +859,38 @@ mod tests {
                 right_value: Box::new(BigDecimal::from_str("3.14159").unwrap().into()),
             },
             EvaluationResult::Boolean(false),
+        ),
+        string_equality: (
+            Expression::Binary {
+                operator: Equal,
+                left_value: Box::new("🐺".to_string().into()),
+                right_value: Box::new("🐺".to_string().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        string_inequality: (
+            Expression::Binary {
+                operator: NotEqual,
+                left_value: Box::new("🦑".to_string().into()),
+                right_value: Box::new("🐙".to_string().into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        boolean_equality: (
+            Expression::Binary {
+                operator: Equal,
+                left_value: Box::new(false.into()),
+                right_value: Box::new(false.into()),
+            },
+            EvaluationResult::Boolean(true),
+        ),
+        boolean_inequality: (
+            Expression::Binary {
+                operator: NotEqual,
+                left_value: Box::new(true.into()),
+                right_value: Box::new(false.into()),
+            },
+            EvaluationResult::Boolean(true),
         ),
         string_concatenation: (
             Expression::Binary {
@@ -873,6 +916,30 @@ mod tests {
             Expression::Unary(UnaryOperator::Not, Box::new("🥯".to_string().into())),
             EvaluationResult::Boolean(false),
         ),
+        concatenate_boolean_and_string: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(true.into()),
+                right_value: Box::new("🥐".to_string().into()),
+            },
+            EvaluationResult::String("true🥐".to_string()),
+        ),
+        concatenate_string_and_boolean: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new("🥐".to_string().into()),
+                right_value: Box::new(false.into()),
+            },
+            EvaluationResult::String("🥐false".to_string()),
+        ),
+        concatenate_number_and_string: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new(BigDecimal::from(4).into()),
+                right_value: Box::new("🥐".to_string().into()),
+            },
+            EvaluationResult::String("4e0🥐".to_string()),
+        ),
         concatenate_string_and_number: (
             Expression::Binary {
                 operator: Add,
@@ -884,10 +951,26 @@ mod tests {
         concatenate_nil_and_string: (
             Expression::Binary {
                 operator: Add,
-                left_value: Box::new(Expression::Literal(Nil)),
+                left_value: Box::new(Nil.into()),
                 right_value: Box::new("🥐".to_string().into()),
             },
             EvaluationResult::String("🥐".to_string()),
+        ),
+        concatenate_string_and_nil: (
+            Expression::Binary {
+                operator: Add,
+                left_value: Box::new("🥐".to_string().into()),
+                right_value: Box::new(Nil.into()),
+            },
+            EvaluationResult::String("🥐".to_string()),
+        ),
+        negate_positive: (
+            Expression::Unary(UnaryOperator::Negative, Box::new(BigDecimal::one().into())),
+            EvaluationResult::Number(BigDecimal::one().neg().into()),
+        ),
+        negate_negative: (
+            Expression::Unary(UnaryOperator::Negative, Box::new(BigDecimal::one().neg().into())),
+            EvaluationResult::Number(BigDecimal::one().into()),
         ),
     }
 
@@ -943,8 +1026,8 @@ mod tests {
         cannot_concatenate_nils: (
             Expression::Binary {
                 operator: Add,
-                left_value: Box::new(Expression::Literal(Nil)),
-                right_value: Box::new(Expression::Literal(Nil)),
+                left_value: Box::new(Nil.into()),
+                right_value: Box::new(Nil.into()),
             },
             NilValue,
         ),
@@ -971,6 +1054,98 @@ mod tests {
             Statement::Expression(Expression::Assignment("a".to_string(), Box::new(BigDecimal::one().into()))),
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
+    }
+
+    #[test]
+    fn addition() {
+        // given
+        let mut environment = Environment::default();
+        let expression = Expression::Binary {
+            operator: Add,
+            left_value: Box::new(BigDecimal::from_f64(std::f64::consts::PI).unwrap().into()),
+            right_value: Box::new(BigDecimal::from_f64(std::f64::consts::PI).unwrap().into()),
+        };
+
+        // when
+        let result = expression
+            .evaluate(&mut environment)
+            .expect("unable to evaluate addition expression");
+
+        // then
+        assert!(matches!(
+            result,
+            EvaluationResult::Number(number)
+            if number.clone().sub(BigDecimal::from_f64(std::f64::consts::TAU).unwrap()).abs() < BigDecimal::from_f64(0.0000000001).unwrap()
+        ))
+    }
+
+    #[test]
+    fn subtraction() {
+        // given
+        let mut environment = Environment::default();
+        let expression = Expression::Binary {
+            operator: Subtract,
+            left_value: Box::new(BigDecimal::from_f64(std::f64::consts::TAU).unwrap().into()),
+            right_value: Box::new(BigDecimal::from_f64(std::f64::consts::PI).unwrap().into()),
+        };
+
+        // when
+        let result = expression
+            .evaluate(&mut environment)
+            .expect("unable to evaluate subtraction expression");
+
+        // then
+        assert!(matches!(
+            result,
+            EvaluationResult::Number(number)
+            if number.clone().sub(BigDecimal::from_f64(std::f64::consts::PI).unwrap()).abs() < BigDecimal::from_f64(0.0000000001).unwrap()
+        ))
+    }
+
+    #[test]
+    fn multiplication() {
+        // given
+        let mut environment = Environment::default();
+        let expression = Expression::Binary {
+            operator: Multiply,
+            left_value: Box::new(BigDecimal::from(2).into()),
+            right_value: Box::new(BigDecimal::from_f64(std::f64::consts::PI).unwrap().into()),
+        };
+
+        // when
+        let result = expression
+            .evaluate(&mut environment)
+            .expect("unable to evaluate multiplication expression");
+
+        // then
+        assert!(matches!(
+            result,
+            EvaluationResult::Number(number)
+            if number.clone().sub(BigDecimal::from_f64(std::f64::consts::TAU).unwrap()).abs() < BigDecimal::from_f64(0.0000000001).unwrap()
+        ))
+    }
+
+    #[test]
+    fn division() {
+        // given
+        let mut environment = Environment::default();
+        let expression = Expression::Binary {
+            operator: Divide,
+            left_value: Box::new(BigDecimal::from_f64(std::f64::consts::TAU).unwrap().into()),
+            right_value: Box::new(BigDecimal::from(2).into()),
+        };
+
+        // when
+        let result = expression
+            .evaluate(&mut environment)
+            .expect("unable to evaluate division expression");
+
+        // then
+        assert!(matches!(
+            result,
+            EvaluationResult::Number(number)
+            if number.clone().sub(BigDecimal::from_f64(std::f64::consts::PI).unwrap()).abs() < BigDecimal::from_f64(0.0000000001).unwrap()
+        ))
     }
 
     #[test]
@@ -1074,7 +1249,7 @@ mod tests {
             expression: Some(BigDecimal::from(2).into()),
         };
         let print_statement = Statement::Print(Expression::Binary {
-            operator: BinaryOperator::Add,
+            operator: Add,
             left_value: Box::new(Expression::VariableReference("a".to_string())),
             right_value: Box::new(Expression::VariableReference("b".to_string())),
         });
