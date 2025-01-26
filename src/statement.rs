@@ -1,6 +1,7 @@
 use crate::environment::{Environment, ExistsError};
 use crate::grammar::{EvaluationError, EvaluationResult, Expression};
 use crate::side_effects::SideEffects;
+use crate::statement::ExecutionError::{CannotRedefineVariable, Evaluation};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -24,6 +25,9 @@ pub(crate) enum Statement {
 
     /// Evaluates an expression and outputs the result
     Print(Expression),
+
+    /// Execute a statement until some condition is no longer met
+    While(Expression, Box<Statement>),
 
     /// A variable declaration with optional definition
     VariableDeclaration {
@@ -51,13 +55,13 @@ impl Statement {
             Self::Expression(expression) => {
                 expression
                     .evaluate(&mut environment.borrow_mut())
-                    .map_err(ExecutionError::Evaluation)?;
+                    .map_err(Evaluation)?;
                 Ok(())
             }
             Self::Print(value) => {
                 let result = value
                     .evaluate(&mut environment.borrow_mut())
-                    .map_err(ExecutionError::Evaluation)?;
+                    .map_err(Evaluation)?;
 
                 side_effects.borrow_mut().println(&format!("{}", result));
 
@@ -71,13 +75,23 @@ impl Statement {
                     .clone() // TODO can we avoid cloning?
                     .map(|e| e.evaluate(&mut environment.borrow_mut()))
                     .unwrap_or(Ok(EvaluationResult::Nil))
-                    .map_err(ExecutionError::Evaluation)?;
+                    .map_err(Evaluation)?;
 
                 environment
                     .borrow_mut()
                     .define(identifier.clone(), result)
-                    .map_err(ExecutionError::CannotRedefineVariable)?;
+                    .map_err(CannotRedefineVariable)?;
 
+                Ok(())
+            }
+            Self::While(condition, statement) => {
+                while condition
+                    .evaluate(&mut environment.borrow_mut())
+                    .map_err(Evaluation)?
+                    .is_truthful()
+                {
+                    statement.execute(environment.clone(), side_effects.clone())?;
+                }
                 Ok(())
             }
             Self::Block(statements) => {
@@ -89,14 +103,14 @@ impl Statement {
                 }
                 Ok(())
             }
-            Statement::If {
+            Self::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
                 if condition
                     .evaluate(&mut environment.borrow_mut())
-                    .map_err(ExecutionError::Evaluation)?
+                    .map_err(Evaluation)?
                     .is_truthful()
                 {
                     then_branch.execute(environment.clone(), side_effects.clone())
@@ -114,8 +128,7 @@ impl Statement {
 mod tests {
     use super::{ExecutionError, Statement};
     use crate::environment::Environment;
-    use crate::grammar::BinaryOperator::Add;
-    use crate::grammar::{EvaluationError, EvaluationResult, Expression};
+    use crate::grammar::{BinaryOperator, EvaluationError, EvaluationResult, Expression};
     use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One};
     use std::cell::RefCell;
@@ -259,7 +272,7 @@ mod tests {
             expression: Some(BigDecimal::from(2).into()),
         };
         let print_statement = Statement::Print(Expression::Binary {
-            operator: Add,
+            operator: BinaryOperator::Add,
             left_value: Box::new(Expression::VariableReference("a".to_string())),
             right_value: Box::new(Expression::VariableReference("b".to_string())),
         });
@@ -374,6 +387,49 @@ mod tests {
         assert_eq!(side_effects.borrow().lines[0], "else clause");
     }
 
+    #[test]
+    fn while_loop_terminates() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let declaration = Statement::VariableDeclaration {
+            // var c = 0
+            identifier: "c".to_string(),
+            expression: Some(0u8.into()),
+        };
+        let reference = Box::new(Expression::VariableReference("c".to_string()));
+        let increment = Statement::Expression(
+            // c = c + 1
+            Expression::Assignment(
+                "c".to_string(),
+                Box::new(Expression::Binary {
+                    operator: BinaryOperator::Add,
+                    left_value: reference.clone(),
+                    right_value: Box::new(1u8.into()),
+                }),
+            ),
+        );
+        let condition = Expression::Binary {
+            // c < 8
+            operator: BinaryOperator::LessThan,
+            left_value: reference.clone(),
+            right_value: Box::new(8u8.into()),
+        };
+        let while_loop = Statement::While(condition, Box::new(increment)); // while c < 8 { c = c + 1 }
+
+        // when
+        declaration
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to declare variable.");
+        while_loop
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute while loop.");
+
+        // then
+        let result = environment.borrow().get("c").expect("c is not defined");
+        assert_eq!(result, EvaluationResult::Number(BigDecimal::from(8u8)));
+    }
+
     #[derive(Default)]
     struct TestSideEffects {
         lines: Vec<String>,
@@ -387,5 +443,11 @@ mod tests {
         // fn eprintln(&mut self, text: &str) {
         //     eprintln!("{}", text);
         // }
+    }
+
+    impl From<u8> for Expression {
+        fn from(value: u8) -> Self {
+            BigDecimal::from(value).into()
+        }
     }
 }
