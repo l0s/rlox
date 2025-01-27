@@ -150,6 +150,7 @@ name = "rlox"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
+ "either",
  "itertools",
  "phf",
  "unicode-segmentation",

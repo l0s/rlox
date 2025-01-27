@@ -4,7 +4,7 @@ use crate::parser::ParseError::{
     InvalidUnaryOperator, MissingCondition, UnclosedCondition, UnclosedGrouping, UnterminatedBlock,
     UnterminatedStatement, VariableNameExpected,
 };
-use crate::statement::Statement;
+use crate::statement::{Statement, VariableDeclarationStatement};
 use crate::token::{Token, TokenType};
 
 #[derive(Debug)]
@@ -132,10 +132,12 @@ impl Parser {
             &TokenType::Semicolon,
             UnterminatedStatement(expression.clone()),
         )?; // TODO distinguish from unterminated print statement
-        Ok(Statement::VariableDeclaration {
-            identifier,
-            expression,
-        })
+        Ok(Statement::VariableDeclaration(
+            VariableDeclarationStatement {
+                identifier,
+                expression,
+            },
+        ))
     }
 
     fn statement(&mut self) -> Result<Statement, ParseError> {
