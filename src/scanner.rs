@@ -64,6 +64,8 @@ static KEYWORDS: phf::Map<&'static str, TokenType> = phf_map! {
     "true" => TokenType::True,
     "var" => TokenType::Variable,
     "while" => TokenType::While,
+    "break" => TokenType::Break,
+    "continue" => TokenType::Continue,
 };
 
 impl<'a> Scanner<'a> {

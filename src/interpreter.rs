@@ -113,6 +113,126 @@ for (var b = 1; a < 10000; b = temp + b) {
         assert_eq!(side_effects.lines[20], "6.765e3");
     }
 
+    #[test]
+    fn break_prevents_future_iterations() {
+        // given
+        let source = "
+for (var i = 0; i < 10; i = i - 1) { // infinite loop 😱
+    print i;
+    if (true) {
+        print \"then clause\";
+        break;
+    } else {
+        print \"else clause\";
+    }
+    print \"Don't print this\";
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 2);
+        assert_eq!(side_effects.lines[0], "0e0");
+        assert_eq!(side_effects.lines[1], "then clause");
+    }
+
+    #[test]
+    fn continue_prevents_subsequent_statements() {
+        // given
+        let source = "
+for (var i = 0; i < 3; i = i + 1) {
+    print i;
+    if (false) {
+        print \"then clause\";
+    } else {
+        continue;
+        print \"else clause\";
+    }
+    print \"Don't print this\";
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 3);
+        assert_eq!(side_effects.lines[0], "0e0");
+        assert_eq!(side_effects.lines[1], "1e0");
+        assert_eq!(side_effects.lines[2], "2e0");
+    }
+
+    #[test]
+    fn break_applies_to_inner_most_loop() {
+        // given
+        let source = "
+for (var i = 0; i < 3; i = i + 1) {
+    for (var j = 0; j < 3; j = j - 1) { // infinite loop 😱
+        break;
+        print \"inner\";
+        print j;
+    }
+    print i;
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 3);
+        assert_eq!(side_effects.lines[0], "0e0");
+        assert_eq!(side_effects.lines[1], "1e0");
+        assert_eq!(side_effects.lines[2], "2e0");
+    }
+
+    #[test]
+    fn continue_applies_to_inner_most_loop() {
+        // given
+        let source = "
+for (var i = 0; i < 3; i = i - 1) { // infinite loop 😱
+    for (var j = 0; j < 3; j = j + 1) {
+        print j;
+        continue;
+        print \"inner\";
+    }
+    break;
+    print \"outer\";
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 3);
+        assert_eq!(side_effects.lines[0], "0e0");
+        assert_eq!(side_effects.lines[1], "1e0");
+        assert_eq!(side_effects.lines[2], "2e0");
+    }
+
     #[derive(Default)]
     struct TestSideEffects {
         lines: Vec<String>,

@@ -196,6 +196,14 @@ impl Parser {
             self.while_statement()
         } else if self.token_match(&[TokenType::OpenBrace]) {
             self.block()
+        } else if self.token_match(&[TokenType::Break, TokenType::Continue]) {
+            let result = match self.previous().clone().token_type {
+                TokenType::Break => Statement::Break,
+                TokenType::Continue => Statement::Continue,
+                _ => unreachable!("Mismatch with previous token"),
+            };
+            self.consume(&TokenType::Semicolon, UnterminatedStatement(None))?;
+            Ok(result)
         } else {
             self.expression_statement()
         }

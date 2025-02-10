@@ -51,6 +51,8 @@ pub(crate) enum TokenType {
     True,
     Variable,
     While,
+    Break,
+    Continue,
 
     /// A comment that terminates at the end of the line
     LineComment,
