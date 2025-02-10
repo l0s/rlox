@@ -1,11 +1,11 @@
-use crate::environment::{Environment, ExistsError};
+use crate::environment::{Environment, ExistsError, LoopControl, NotInALoopError};
 use crate::grammar::{EvaluationError, EvaluationResult, Expression};
 use crate::side_effects::SideEffects;
-use crate::statement::ExecutionError::{CannotRedefineVariable, Evaluation};
 use either::Either;
 use std::cell::RefCell;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
+use ExecutionError::{CannotRedefineVariable, Evaluation, NotInALoop};
 
 // #[derive(Clone, Debug)]
 // pub(crate) struct Program {
@@ -44,6 +44,11 @@ pub(crate) enum Statement {
 
     /// Execute a statement until some condition is no longer met
     While(Expression, Box<Statement>),
+    /// Exit a loop, skipping any remaining statements in an iteration and all subsequent iterations
+    Break,
+    /// Jump to the next iteration of a loop, skipping any remaining statements in the current
+    /// iteration
+    Continue,
 
     /// A variable declaration with optional definition
     VariableDeclaration(VariableDeclarationStatement),
@@ -86,6 +91,8 @@ impl VariableDeclarationStatement {
 pub(crate) enum ExecutionError {
     Evaluation(EvaluationError),
     CannotRedefineVariable(ExistsError),
+    /// Attempted to use a `break` or `continue` statement outside the context of a loop.
+    NotInALoop(NotInALoopError),
 }
 
 impl Display for ExecutionError {
@@ -93,6 +100,12 @@ impl Display for ExecutionError {
         match self {
             Evaluation(e) => write!(f, "Evaluation error: {}", e),
             CannotRedefineVariable(e) => write!(f, "Cannot redefine variable: {}", e),
+            // FIXME Display dependent on Debug
+            NotInALoop(e) => write!(
+                f,
+                "Encountered `break` or `continue` outside a loop: {:?}",
+                e
+            ),
         }
     }
 }
@@ -104,122 +117,214 @@ impl Statement {
         side_effects: Rc<RefCell<S>>,
     ) -> Result<(), ExecutionError> {
         match self {
-            Self::Expression(expression) => {
-                expression
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?;
-                Ok(())
-            }
+            Self::Expression(expression) => self.execute_expression(environment, expression),
             Self::For {
                 initializer,
                 condition,
                 increment,
                 statement,
-            } => {
-                // For loops get their own scope
-                let child = Rc::new(RefCell::new(Environment::new_nested_scope(
-                    environment.clone(),
-                )));
-                match initializer {
-                    Some(Either::Left(declaration)) => {
-                        declaration.execute(child.clone())?;
-                    }
-                    Some(Either::Right(expression)) => {
-                        expression
-                            .evaluate(&mut child.borrow_mut())
-                            .map_err(Evaluation)?;
-                    }
-                    None => {}
-                }
-
-                let evaluate_condition = || -> Result<bool, ExecutionError> {
-                    Ok(if let Some(condition) = condition {
-                        condition
-                            .evaluate(&mut child.borrow_mut())
-                            .map_err(Evaluation)?
-                            .is_truthful()
-                    } else {
-                        true
-                    })
-                };
-
-                while evaluate_condition()? {
-                    match statement.as_ref() {
-                        Self::Block(statements) => {
-                            // avoid creating a new child scope when we already created one for the
-                            // "for" loop
-                            for statement in statements {
-                                statement.execute(child.clone(), side_effects.clone())?;
-                            }
-                        }
-                        _ => statement.execute(child.clone(), side_effects.clone())?,
-                    }
-                    if let Some(increment) = increment {
-                        increment
-                            .evaluate(&mut child.borrow_mut())
-                            .map_err(Evaluation)?;
-                    }
-                }
-
-                Ok(())
-            }
-            Self::Print(value) => {
-                let result = value
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?;
-
-                side_effects.borrow_mut().println(&format!("{}", result));
-
-                Ok(())
-            }
-            Self::VariableDeclaration(declaration) => declaration.execute(environment.clone()),
+            } => self.execute_for_loop(
+                environment,
+                side_effects,
+                initializer,
+                condition,
+                increment,
+                statement.clone(),
+            ),
+            Self::Print(value) => self.execute_print(environment, side_effects, value),
+            Self::VariableDeclaration(declaration) => declaration.execute(environment),
             Self::While(condition, statement) => {
-                while condition
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?
-                    .is_truthful()
-                {
-                    statement.execute(environment.clone(), side_effects.clone())?;
-                }
-                Ok(())
+                self.execute_while_loop(environment, side_effects, condition, statement.as_ref())
             }
             Self::Block(statements) => {
                 let child = Rc::new(RefCell::new(Environment::new_nested_scope(
                     environment.clone(),
                 )));
-                for statement in statements {
-                    statement.execute(child.clone(), side_effects.clone())?;
-                }
-                Ok(())
+                self.execute_block(child, side_effects, statements)
             }
             Self::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => {
-                if condition
+            } => self.execute_if_statement(
+                environment,
+                side_effects,
+                condition,
+                then_branch.as_ref(),
+                else_branch.clone(),
+            ),
+            Statement::Break => environment.borrow_mut().exit_loop().map_err(NotInALoop),
+            Statement::Continue => environment
+                .borrow_mut()
+                .jump_to_next_loop_iteration()
+                .map_err(NotInALoop),
+        }
+    }
+
+    fn execute_expression(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        expression: &Expression,
+    ) -> Result<(), ExecutionError> {
+        expression
+            .evaluate(&mut environment.borrow_mut())
+            .map_err(Evaluation)?;
+        Ok(())
+    }
+
+    fn execute_for_loop<S: SideEffects>(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<S>>,
+        initializer: &Option<Either<VariableDeclarationStatement, Expression>>,
+        condition: &Option<Expression>,
+        increment: &Option<Expression>,
+        statement: Box<Statement>,
+    ) -> Result<(), ExecutionError> {
+        // For loops get their own scope
+        let loop_control = Rc::new(RefCell::new(LoopControl::default()));
+        let environment = Rc::new(RefCell::new(Environment::new_nested_loop_scope(
+            environment.clone(),
+            loop_control.clone(),
+        )));
+        match initializer {
+            Some(Either::Left(declaration)) => {
+                declaration.execute(environment.clone())?;
+            }
+            Some(Either::Right(expression)) => {
+                expression
+                    .evaluate(&mut environment.borrow_mut())
+                    .map_err(Evaluation)?;
+            }
+            None => {}
+        }
+
+        let evaluate_condition = || -> Result<bool, ExecutionError> {
+            Ok(if let Some(condition) = condition {
+                condition
                     .evaluate(&mut environment.borrow_mut())
                     .map_err(Evaluation)?
                     .is_truthful()
-                {
-                    then_branch.execute(environment.clone(), side_effects.clone())
-                } else if let Some(else_branch) = else_branch {
-                    else_branch.execute(environment.clone(), side_effects.clone())
-                } else {
-                    Ok(())
+            } else {
+                true
+            })
+        };
+
+        while evaluate_condition()? {
+            match statement.as_ref() {
+                // If statement is a block, avoid creating a new nested scope since the loop already
+                // defines its own scope
+                Self::Block(statements) => {
+                    self.execute_block(environment.clone(), side_effects.clone(), statements)?
                 }
+                _ => statement.execute(environment.clone(), side_effects.clone())?,
             }
+            if loop_control.borrow().exit_loop {
+                break;
+            } else if loop_control.borrow().jump_to_next_iteration {
+                loop_control.borrow_mut().jump_to_next_iteration = false;
+            }
+            if let Some(increment) = increment {
+                increment
+                    .evaluate(&mut environment.borrow_mut())
+                    .map_err(Evaluation)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn execute_print<S: SideEffects>(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<S>>,
+        value: &Expression,
+    ) -> Result<(), ExecutionError> {
+        let result = value
+            .evaluate(&mut environment.borrow_mut())
+            .map_err(Evaluation)?;
+
+        side_effects.borrow_mut().println(&format!("{}", result));
+
+        Ok(())
+    }
+
+    fn execute_while_loop<S: SideEffects>(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<S>>,
+        condition: &Expression,
+        statement: &Statement,
+    ) -> Result<(), ExecutionError> {
+        let loop_control = Rc::new(RefCell::new(LoopControl::default()));
+        let environment = Rc::new(RefCell::new(Environment::new_nested_loop_scope(
+            environment.clone(),
+            loop_control.clone(),
+        )));
+        while condition
+            .evaluate(&mut environment.borrow_mut())
+            .map_err(Evaluation)?
+            .is_truthful()
+        {
+            statement.execute(environment.clone(), side_effects.clone())?;
+            if loop_control.borrow().exit_loop {
+                break;
+            } else if loop_control.borrow().jump_to_next_iteration {
+                loop_control.borrow_mut().jump_to_next_iteration = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_block<S: SideEffects>(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<S>>,
+        statements: &[Statement],
+    ) -> Result<(), ExecutionError> {
+        for statement in statements {
+            statement.execute(environment.clone(), side_effects.clone())?;
+            if environment.borrow().should_exit_loop()
+                || environment.borrow().should_jump_to_next_loop_iteration()
+            {
+                // stop executing remaining statements
+                // loop control will be managed in the loop statement (for or while)
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_if_statement<S: SideEffects>(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<S>>,
+        condition: &Expression,
+        then_branch: &Statement,
+        else_branch: Option<Box<Statement>>,
+    ) -> Result<(), ExecutionError> {
+        if condition
+            .evaluate(&mut environment.borrow_mut())
+            .map_err(Evaluation)?
+            .is_truthful()
+        {
+            then_branch.execute(environment.clone(), side_effects.clone())
+        } else if let Some(else_branch) = else_branch {
+            else_branch.execute(environment.clone(), side_effects.clone())
+        } else {
+            Ok(())
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Statement::{Block, Break, Continue, For, Print};
     use super::{ExecutionError, Statement, VariableDeclarationStatement};
     use crate::environment::Environment;
-    use crate::grammar::{BinaryOperator, EvaluationError, EvaluationResult, Expression};
+    use crate::grammar::Expression::VariableReference;
+    use crate::grammar::{BinaryOperator, EvaluationError, EvaluationResult, Expression, Literal};
     use crate::side_effects::{SideEffects, StandardSideEffects};
-    use crate::statement::Statement::{Block, Print};
     use bigdecimal::{BigDecimal, One, Zero};
     use either::Left;
     use std::cell::RefCell;
@@ -719,6 +824,104 @@ mod tests {
             EvaluationResult::Number(i)
             if i == BigDecimal::from(-1)
         ))
+    }
+
+    #[test]
+    fn break_exits_loop() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+
+        let declaration = VariableDeclarationStatement {
+            identifier: "i".to_string(),
+            expression: Some(BigDecimal::zero().into()),
+        };
+        let condition = Expression::Binary {
+            operator: BinaryOperator::LessThan,
+            left_value: Box::new(Expression::VariableReference("i".to_string())),
+            right_value: Box::new(BigDecimal::from(1_000_000).into()),
+        };
+        let increment = Expression::Assignment(
+            "i".to_string(),
+            Box::new(Expression::Binary {
+                operator: BinaryOperator::Add,
+                left_value: Box::new(Expression::VariableReference("i".to_string())),
+                right_value: Box::new(BigDecimal::one().into()),
+            }),
+        );
+        let block = Block(vec![
+            Print(Expression::Literal(Literal::String("Print me".to_string()))),
+            Break,
+            Print(Expression::Literal(Literal::String(
+                "Don't print me".to_string(),
+            ))),
+        ]);
+        let for_loop = For {
+            initializer: Some(Left(declaration)),
+            condition: Some(condition),
+            increment: Some(increment),
+            statement: Box::new(block),
+        };
+
+        // when
+        for_loop
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute for loop");
+
+        // then
+        let lines = &side_effects.borrow().lines;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "Print me".to_string());
+    }
+
+    #[test]
+    fn continue_skips_statements() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+
+        let declaration = VariableDeclarationStatement {
+            identifier: "i".to_string(),
+            expression: Some(BigDecimal::zero().into()),
+        };
+        let condition = Expression::Binary {
+            operator: BinaryOperator::LessThan,
+            left_value: Box::new(Expression::VariableReference("i".to_string())),
+            right_value: Box::new(BigDecimal::from(3).into()),
+        };
+        let increment = Expression::Assignment(
+            "i".to_string(),
+            Box::new(Expression::Binary {
+                operator: BinaryOperator::Add,
+                left_value: Box::new(Expression::VariableReference("i".to_string())),
+                right_value: Box::new(BigDecimal::one().into()),
+            }),
+        );
+        let block = Block(vec![
+            Print(VariableReference("i".to_string())),
+            Continue,
+            Print(Expression::Literal(Literal::String(
+                "Don't print me".to_string(),
+            ))),
+        ]);
+        let for_loop = For {
+            initializer: Some(Left(declaration)),
+            condition: Some(condition),
+            increment: Some(increment),
+            statement: Box::new(block),
+        };
+
+        // when
+        for_loop
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute for loop");
+
+        // then
+        let lines = &side_effects.borrow().lines;
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "0e0".to_string());
+        assert_eq!(lines[1], "1e0".to_string());
+        assert_eq!(lines[2], "2e0".to_string());
     }
 
     #[derive(Default)]

@@ -11,6 +11,13 @@ pub(crate) struct Environment {
     /// If `None`, then the environment is the global scope, otherwise
     parent: Option<Rc<RefCell<Self>>>,
     values: HashMap<String, EvaluationResult>,
+    loop_control: Option<Rc<RefCell<LoopControl>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct LoopControl {
+    pub(crate) exit_loop: bool,
+    pub(crate) jump_to_next_iteration: bool,
 }
 
 /// Attempted to reference a variable that has never been declared
@@ -22,6 +29,10 @@ pub(crate) struct UndefinedError;
 /// Note: redefining a variable is allowed in the global scope only.
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) struct ExistsError;
+
+/// Attempted to use a `break` or `continue` statement outside the context of a loop
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) struct NotInALoopError;
 
 impl Display for ExistsError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -79,10 +90,56 @@ impl Environment {
         }
     }
 
+    pub fn should_exit_loop(&self) -> bool {
+        if let Some(loop_control) = self.loop_control.clone() {
+            loop_control.borrow().exit_loop
+        } else {
+            false
+        }
+    }
+
+    pub fn should_jump_to_next_loop_iteration(&self) -> bool {
+        if let Some(loop_control) = self.loop_control.clone() {
+            loop_control.borrow().jump_to_next_iteration
+        } else {
+            false
+        }
+    }
+
+    pub fn exit_loop(&mut self) -> Result<(), NotInALoopError> {
+        if let Some(loop_control) = self.loop_control.clone() {
+            loop_control.borrow_mut().exit_loop = true;
+            Ok(())
+        } else {
+            Err(NotInALoopError)
+        }
+    }
+
+    pub fn jump_to_next_loop_iteration(&mut self) -> Result<(), NotInALoopError> {
+        if let Some(loop_control) = self.loop_control.clone() {
+            loop_control.borrow_mut().jump_to_next_iteration = true;
+            Ok(())
+        } else {
+            Err(NotInALoopError)
+        }
+    }
+
     pub fn new_nested_scope(parent: Rc<RefCell<Self>>) -> Self {
         Self {
-            parent: Some(parent),
+            parent: Some(parent.clone()),
             values: Default::default(),
+            loop_control: parent.borrow().loop_control.clone(),
+        }
+    }
+
+    pub fn new_nested_loop_scope(
+        parent: Rc<RefCell<Self>>,
+        loop_control: Rc<RefCell<LoopControl>>,
+    ) -> Self {
+        Self {
+            parent: Some(parent.clone()),
+            values: Default::default(),
+            loop_control: Some(loop_control.clone()),
         }
     }
 }
