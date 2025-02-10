@@ -23,6 +23,7 @@ impl Default for Interpreter<StandardSideEffects> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum InterpreterError {
     /// Errors occurred while tokenizing the input
     Lex(Vec<LexicalError>),
@@ -57,9 +58,14 @@ impl<S: SideEffects> Interpreter<S> {
         let parser: Parser = tokens.into();
         let statements: Vec<Statement> = parser.try_into().map_err(Parse)?;
         for statement in statements {
-            statement
-                .execute(self.environment.clone(), self.side_effects.clone())
-                .map_err(Execution)?;
+            if let Err(execution_error) =
+                statement.execute(self.environment.clone(), self.side_effects.clone())
+            {
+                self.side_effects
+                    .borrow_mut()
+                    .eprintln(&format!("{}", execution_error));
+                return Err(Execution(execution_error));
+            }
         }
 
         Ok(())
@@ -70,5 +76,55 @@ impl<S: SideEffects> Interpreter<S> {
         expression: &Expression,
     ) -> Result<EvaluationResult, EvaluationError> {
         expression.evaluate(&mut self.environment.borrow_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Interpreter;
+    use crate::side_effects::SideEffects;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn can_interpret_fib() {
+        // given
+        let source = "
+var a = 0;
+var temp;
+
+for (var b = 1; a < 10000; b = temp + b) {
+  print a;
+  temp = a;
+  a = b;
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 21);
+        assert_eq!(side_effects.lines[20], "6.765e3");
+    }
+
+    #[derive(Default)]
+    struct TestSideEffects {
+        lines: Vec<String>,
+    }
+
+    impl SideEffects for TestSideEffects {
+        fn println(&mut self, text: &str) {
+            self.lines.push(text.to_string())
+        }
+
+        fn eprintln(&mut self, _text: &str) {
+            unimplemented!()
+        }
     }
 }

@@ -106,7 +106,7 @@ fn interpret_line<S: SideEffects>(
                             (0, 0)
                         }
                         Err(error) => {
-                            eprintln!("Evaluation error: {:?}", error);
+                            eprintln!("Evaluation error: {}", error);
                             (0, 1)
                         }
                     },
@@ -129,11 +129,11 @@ fn report(result: Result<(), InterpreterError>) -> (usize, usize) {
                 (error_count, 0)
             }
             InterpreterError::Parse(parse_error) => {
-                eprintln!("Parse error: {:?}", parse_error);
+                eprintln!("Parse error: {}", parse_error);
                 (1, 0)
             }
             InterpreterError::Execution(execution_error) => {
-                eprintln!("Execution error: {:?}", execution_error);
+                eprintln!("Execution error: {}", execution_error);
                 (0, 1)
             }
         },
@@ -210,6 +210,10 @@ mod tests {
     impl SideEffects for TestSideEffects {
         fn println(&mut self, text: &str) {
             self.lines.push(text.to_string());
+        }
+
+        fn eprintln(&mut self, text: &str) {
+            eprintln!("{}", text);
         }
     }
 }

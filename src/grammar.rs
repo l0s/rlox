@@ -132,6 +132,17 @@ pub enum EvaluationError {
     Undefined,
 }
 
+impl Display for EvaluationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeMismatch => write!(f, "TypeMismatch"),
+            NilValue => write!(f, "Attempted to use nil value"),
+            DivideByZero => write!(f, "Attempted to divide by zero"),
+            Undefined => write!(f, "Expression refers to an undefined variable"),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum BinaryOperator {
     Equal,

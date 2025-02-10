@@ -1,11 +1,14 @@
 use crate::grammar::{BinaryOperator, Expression, Literal, UnaryOperator};
 use crate::parser::ParseError::{
     InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
-    InvalidUnaryOperator, MissingCondition, UnclosedCondition, UnclosedGrouping, UnterminatedBlock,
-    UnterminatedStatement, VariableNameExpected,
+    InvalidUnaryOperator, MissingCondition, MissingForParameters, MissingSemicolonAfterInitializer,
+    MissingSemicolonAfterLoopCondition, UnclosedCondition, UnclosedForParameters, UnclosedGrouping,
+    UnterminatedBlock, UnterminatedStatement, VariableNameExpected,
 };
 use crate::statement::{Statement, VariableDeclarationStatement};
 use crate::token::{Token, TokenType};
+use either::{Left, Right};
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug)]
 pub(crate) struct Parser {
@@ -26,7 +29,7 @@ impl From<Vec<Token>> for Parser {
 pub(crate) enum ParseError {
     InvalidBinaryOperator,
     InvalidUnaryOperator,
-    InvalidPrimaryToken,
+    InvalidPrimaryToken(Option<Token>),
     InvalidLiteral,
     UnclosedGrouping,
     /// Statement is missing a semicolon
@@ -39,6 +42,42 @@ pub(crate) enum ParseError {
     MissingCondition,
     /// Missing close parenthesis after conditional
     UnclosedCondition,
+    /// For loop is missing the parenthetical section
+    MissingForParameters,
+    /// For loop's parenthetical section is not closed
+    UnclosedForParameters,
+    MissingSemicolonAfterLoopCondition,
+    MissingSemicolonAfterInitializer,
+}
+
+impl Display for ParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // TODO `Display` depends on `Debug` for `Token` and `Expression`
+            InvalidPrimaryToken(token) => write!(f, "Invalid primary token: {:?}", token),
+            // TODO add error location details
+            InvalidBinaryOperator => write!(f, "Invalid binary operator"),
+            InvalidUnaryOperator => write!(f, "Invalid unary operator"),
+            InvalidLiteral => write!(f, "Invalid literal"),
+            UnclosedGrouping => write!(f, "Unclosed grouping"),
+            UnterminatedStatement(expression) => {
+                write!(f, "Unterminated statement: {:?}", expression)
+            }
+            UnterminatedBlock => write!(f, "Unterminated block"),
+            VariableNameExpected => write!(f, "Variable name expected"),
+            InvalidAssignmentTarget => write!(f, "Invalid assignment target"),
+            MissingCondition => write!(f, "Missing condition"),
+            UnclosedCondition => write!(f, "Unclosed condition"),
+            MissingForParameters => write!(f, "Missing `for` parameters"),
+            UnclosedForParameters => write!(f, "Unclosed `for` parameters"),
+            MissingSemicolonAfterLoopCondition => {
+                write!(f, "Missing semicolon after loop condition")
+            }
+            MissingSemicolonAfterInitializer => {
+                write!(f, "Missing semicolon after loop initializer")
+            }
+        }
+    }
 }
 
 impl TryFrom<Token> for BinaryOperator {
@@ -120,6 +159,12 @@ impl Parser {
         }
     }
 
+    /// Parse a variable declaration and optional initialization including the trailing semicolon.
+    ///
+    /// Returns:
+    /// - `Ok(Statement)` - if the entire declaration and optional can be parsed
+    /// - `Err(ParseError)` - if the variable name is not defined or the initialization expression
+    ///     cannot be parsed
     fn variable_declaration(&mut self) -> Result<Statement, ParseError> {
         let name_token = self.consume(&TokenType::Identifier, VariableNameExpected)?;
         let identifier = name_token.lexeme.clone();
@@ -141,7 +186,9 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Statement, ParseError> {
-        if self.token_match(&[TokenType::If]) {
+        if self.token_match(&[TokenType::For]) {
+            self.for_statement()
+        } else if self.token_match(&[TokenType::If]) {
             self.if_statement()
         } else if self.token_match(&[TokenType::Print]) {
             self.print_statement()
@@ -152,6 +199,50 @@ impl Parser {
         } else {
             self.expression_statement()
         }
+    }
+
+    fn for_statement(&mut self) -> Result<Statement, ParseError> {
+        self.consume(&TokenType::OpenParenthesis, MissingForParameters)?;
+        let initializer = if self.token_match(&[TokenType::Semicolon]) {
+            None
+        } else if self.token_match(&[TokenType::Variable]) {
+            let declaration = self.variable_declaration()?;
+            if let Statement::VariableDeclaration(declaration) = declaration {
+                Some(Left(declaration))
+            } else {
+                panic!(
+                    "Invalid variable declaration in `for` loop: {:?}",
+                    declaration
+                );
+            }
+        } else {
+            let result = Some(Right(self.expression()?));
+            self.consume(&TokenType::Semicolon, MissingSemicolonAfterInitializer)?;
+            result
+        };
+
+        let condition = if !self.check(&TokenType::Semicolon) {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        self.consume(&TokenType::Semicolon, MissingSemicolonAfterLoopCondition)?;
+
+        let increment = if !self.check(&TokenType::CloseParenthesis) {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        self.consume(&TokenType::CloseParenthesis, UnclosedForParameters)?;
+
+        let statement = Box::new(self.statement()?);
+
+        Ok(Statement::For {
+            initializer,
+            condition,
+            increment,
+            statement,
+        })
     }
 
     fn while_statement(&mut self) -> Result<Statement, ParseError> {
@@ -347,10 +438,22 @@ impl Parser {
                 self.previous().lexeme.clone(),
             ))
         } else {
-            Err(InvalidPrimaryToken)
+            Err(InvalidPrimaryToken(self.peek().cloned()))
         }
     }
 
+    /// Expect the current token to match the expected type and if so, advance the cursor.
+    ///
+    /// Parameters:
+    /// - `token_type` - the expected type which will advance the cursor
+    /// - `conditional_error` - the parse error to return if the current token is not the expected
+    ///     type.
+    ///
+    /// Returns:
+    /// - `Ok(&Token)` - if the token at the cursor matches the expected type and the cursor has
+    ///     since been advanced
+    /// - `Err(ParseError)` - if the token at the cursor did not match the expected type and the
+    ///     cursor has not been modified
     fn consume(
         &mut self,
         token_type: &TokenType,
@@ -381,6 +484,7 @@ impl Parser {
         false
     }
 
+    /// Check if the token at the cursor matches the expected type. This does not modify the cursor.
     fn check(&self, token_type: &TokenType) -> bool {
         if let Some(current) = self.peek() {
             current.token_type == *token_type
@@ -444,9 +548,10 @@ mod tests {
     use super::{ParseError, Parser};
     use crate::grammar::{BinaryOperator, Expression, Literal};
     use crate::parser::ParseError::{MissingCondition, UnclosedCondition};
-    use crate::statement::Statement;
+    use crate::statement::{Statement, VariableDeclarationStatement};
     use crate::token::{Token, TokenType};
-    use bigdecimal::{BigDecimal, One};
+    use bigdecimal::{BigDecimal, One, Zero};
+    use either::{Left, Right};
     use std::ops::Deref;
 
     #[test]
@@ -454,9 +559,9 @@ mod tests {
         // given
         let tokens = [
             Token::new_int(5),
-            Token::new(TokenType::Minus, "-".to_string(), 0),
+            TokenType::Minus.into(),
             Token::new_int(3),
-            Token::new(TokenType::Minus, "-".to_string(), 0),
+            TokenType::Minus.into(),
             Token::new_int(1),
         ]
         .to_vec();
@@ -504,12 +609,12 @@ mod tests {
     fn parse_grouping() {
         // given
         let tokens = [
-            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            TokenType::OpenParenthesis.into(),
             Token::new_int(6),
-            Token::new(TokenType::ForwardSlash, "/".to_string(), 0),
+            TokenType::ForwardSlash.into(),
             Token::new_int(3),
-            Token::new(TokenType::CloseParenthesis, "(".to_string(), 0),
-            Token::new(TokenType::Minus, "-".to_string(), 0),
+            TokenType::CloseParenthesis.into(),
+            TokenType::Minus.into(),
             Token::new_int(1),
         ]
         .to_vec();
@@ -561,9 +666,9 @@ mod tests {
     fn handle_unclosed_grouping() {
         // given
         let tokens = [
-            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
+            TokenType::OpenParenthesis.into(),
             Token::new_int(6),
-            Token::new(TokenType::ForwardSlash, "/".to_string(), 0),
+            TokenType::ForwardSlash.into(),
             Token::new_int(3),
         ]
         .to_vec();
@@ -583,10 +688,10 @@ mod tests {
     fn parse_assignment() {
         // given
         let tokens = [
-            Token::new(TokenType::Identifier, "a".to_string(), 0),
-            Token::new(TokenType::Assignment, "=".to_string(), 0),
+            Token::new(TokenType::Identifier, "a".to_string(), 0, 0),
+            TokenType::Assignment.into(),
             Token::new_int(3),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -609,12 +714,12 @@ mod tests {
     fn cannot_assign_to_grouping() {
         // given
         let tokens = [
-            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
-            Token::new(TokenType::Identifier, "a".to_string(), 0),
-            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
-            Token::new(TokenType::Assignment, "=".to_string(), 0),
+            TokenType::OpenParenthesis.into(),
+            Token::new(TokenType::Identifier, "a".to_string(), 0, 1),
+            TokenType::CloseParenthesis.into(),
+            TokenType::Assignment.into(),
             Token::new_int(3),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -631,12 +736,12 @@ mod tests {
     fn cannot_assign_to_expression() {
         // given
         let tokens = [
-            Token::new(TokenType::Identifier, "a".to_string(), 0),
-            Token::new(TokenType::Plus, "+".to_string(), 0),
-            Token::new(TokenType::Identifier, "b".to_string(), 0),
-            Token::new(TokenType::Assignment, "=".to_string(), 0),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            Token::new(TokenType::Identifier, "a".to_string(), 0, 0),
+            TokenType::Plus.into(),
+            Token::new(TokenType::Identifier, "b".to_string(), 0, 2),
+            TokenType::Assignment.into(),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 4),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -653,21 +758,21 @@ mod tests {
     fn else_bound_to_nearest_if() {
         // given
         let tokens = [
-            Token::new(TokenType::If, "if".to_string(), 0),
-            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
-            Token::new(TokenType::True, "true".to_string(), 0),
-            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
-            Token::new(TokenType::If, "if".to_string(), 0),
-            Token::new(TokenType::OpenParenthesis, "(".to_string(), 0),
-            Token::new(TokenType::True, "true".to_string(), 0),
-            Token::new(TokenType::CloseParenthesis, ")".to_string(), 0),
-            Token::new(TokenType::Print, "print".to_string(), 0),
-            Token::new(TokenType::Identifier, "whenTrue".to_string(), 0),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
-            Token::new(TokenType::Else, "else".to_string(), 0),
-            Token::new(TokenType::Print, "print".to_string(), 0),
-            Token::new(TokenType::Identifier, "whenFalse".to_string(), 0),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            TokenType::If.into(),
+            TokenType::OpenParenthesis.into(),
+            TokenType::True.into(),
+            TokenType::CloseParenthesis.into(),
+            TokenType::If.into(),
+            TokenType::OpenParenthesis.into(),
+            TokenType::True.into(),
+            TokenType::CloseParenthesis.into(),
+            TokenType::Print.into(),
+            Token::new(TokenType::Identifier, "whenTrue".to_string(), 0, 33),
+            TokenType::Semicolon.into(),
+            TokenType::Else.into(),
+            TokenType::Print.into(),
+            Token::new(TokenType::Identifier, "whenFalse".to_string(), 0, 46),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -718,11 +823,11 @@ mod tests {
     fn parse_disjunction() {
         // given
         let tokens = [
-            Token::new(TokenType::Print, "print".to_string(), 0),
+            TokenType::Print.into(),
             Token::from("hi".to_string()),
-            Token::new(TokenType::Or, "or".to_string(), 0),
+            TokenType::Or.into(),
             Token::from(2u8),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -769,11 +874,11 @@ mod tests {
     fn parse_conjunction() {
         // given
         let tokens = [
-            Token::new(TokenType::Print, "print".to_string(), 0),
-            Token::new(TokenType::Nil, "nil".to_string(), 0),
-            Token::new(TokenType::And, "and".to_string(), 0),
+            TokenType::Print.into(),
+            TokenType::Nil.into(),
+            TokenType::And.into(),
             Token::from("hi".to_string()),
-            Token::new(TokenType::Semicolon, ";".to_string(), 0),
+            TokenType::Semicolon.into(),
         ]
         .to_vec();
         let parser: Parser = tokens.into();
@@ -818,14 +923,14 @@ mod tests {
         let tokens = [
             TokenType::While.into(),
             TokenType::OpenParenthesis.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 8),
             TokenType::LessThan.into(),
             8u8.into(),
             TokenType::CloseParenthesis.into(),
             TokenType::OpenBrace.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 15),
             TokenType::Assignment.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 18),
             TokenType::Plus.into(),
             1u8.into(),
             TokenType::Semicolon.into(),
@@ -892,14 +997,14 @@ mod tests {
         // given
         let tokens = [
             TokenType::While.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 7),
             TokenType::LessThan.into(),
             8u8.into(),
             TokenType::CloseParenthesis.into(),
             TokenType::OpenBrace.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 13),
             TokenType::Assignment.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 16),
             TokenType::Plus.into(),
             1u8.into(),
             TokenType::Semicolon.into(),
@@ -922,13 +1027,13 @@ mod tests {
         let tokens = [
             TokenType::While.into(),
             TokenType::OpenParenthesis.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 8),
             TokenType::LessThan.into(),
             8u8.into(),
             TokenType::OpenBrace.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 14),
             TokenType::Assignment.into(),
-            Token::new(TokenType::Identifier, "c".to_string(), 0),
+            Token::new(TokenType::Identifier, "c".to_string(), 0, 17),
             TokenType::Plus.into(),
             1u8.into(),
             TokenType::Semicolon.into(),
@@ -945,43 +1050,191 @@ mod tests {
         assert_eq!(result, UnclosedCondition);
     }
 
+    #[test]
+    fn empty_for_loop() {
+        // given
+        let tokens = [
+            // `for (;;) {}`
+            TokenType::For.into(),
+            TokenType::OpenParenthesis.into(),
+            TokenType::Semicolon.into(),
+            TokenType::Semicolon.into(),
+            TokenType::CloseParenthesis.into(),
+            TokenType::OpenBrace.into(),
+            TokenType::CloseBrace.into(),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse for loop");
+
+        // then
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Statement::For {
+                initializer,
+                condition,
+                increment,
+                statement
+            }
+            if initializer.is_none() && condition.is_none() && increment.is_none()
+            && matches!(
+                statement.as_ref(),
+                Statement::Block(statements)
+                if statements.is_empty()
+            )
+        ));
+    }
+
+    #[test]
+    fn for_loop_with_declaration() {
+        // given
+        let tokens: Vec<Token> = [
+            // `for (var i = 0; ;) {}`
+            TokenType::For.into(),
+            TokenType::OpenParenthesis.into(),
+            TokenType::Variable.into(),
+            Token::new(TokenType::Identifier, "i".to_string(), 0, 9),
+            TokenType::Assignment.into(),
+            0u8.into(),
+            TokenType::Semicolon.into(),
+            TokenType::Semicolon.into(),
+            TokenType::CloseParenthesis.into(),
+            TokenType::OpenBrace.into(),
+            TokenType::CloseBrace.into(),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse for loop");
+
+        // then
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Statement::For {
+                initializer,
+                condition,
+                increment,
+                statement
+            }
+            if condition.is_none() && increment.is_none()
+            && matches!(
+                initializer,
+                Some(Left(VariableDeclarationStatement {
+                    identifier,
+                    expression,
+                }))
+                if identifier == "i"
+                && matches!(
+                    expression,
+                    Some(Expression::Literal(Literal::Number(initial_value)))
+                    if initial_value == &BigDecimal::zero()
+                )
+            )
+            && matches!(
+                statement.as_ref(),
+                Statement::Block(statements)
+                if statements.is_empty()
+            )
+        ));
+    }
+
+    #[test]
+    fn for_loop_with_initialization() {
+        // given
+        let tokens: Vec<Token> = [
+            // `for (i = 1; ;) {}`
+            TokenType::For.into(),
+            TokenType::OpenParenthesis.into(),
+            Token::new(TokenType::Identifier, "i".to_string(), 0, 5),
+            TokenType::Assignment.into(),
+            1u8.into(),
+            Token::new(TokenType::Semicolon, ";".into(), 0, 10),
+            Token::new(TokenType::Semicolon, ";".into(), 0, 12),
+            TokenType::CloseParenthesis.into(),
+            TokenType::OpenBrace.into(),
+            TokenType::CloseBrace.into(),
+        ]
+        .to_vec();
+        let parser: Parser = tokens.into();
+
+        // when
+        let result: Vec<Statement> = parser.try_into().expect("Unable to parse for loop");
+
+        // then
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Statement::For {
+                initializer,
+                condition,
+                increment,
+                statement
+            }
+            if condition.is_none() && increment.is_none()
+            && matches!(
+                initializer,
+                Some(Right(Expression::Assignment (
+                    identifier,
+                    expression,
+                )))
+                if identifier == "i"
+                && matches!(
+                    expression.as_ref(),
+                    Expression::Literal(Literal::Number(initial_value))
+                    if initial_value == &BigDecimal::one()
+                )
+            )
+            && matches!(
+                statement.as_ref(),
+                Statement::Block(statements)
+                if statements.is_empty()
+            )
+        ));
+    }
+
     impl From<TokenType> for Token {
         fn from(value: TokenType) -> Self {
             match value {
-                TokenType::OpenParenthesis => Self::new(value, "(".to_string(), 0),
-                TokenType::CloseParenthesis => Self::new(value, ")".to_string(), 0),
-                TokenType::OpenBrace => Self::new(value, "{".to_string(), 0),
-                TokenType::CloseBrace => Self::new(value, ")".to_string(), 0),
-                TokenType::Comma => Self::new(value, ",".to_string(), 0),
-                TokenType::Period => Self::new(value, ".".to_string(), 0),
-                TokenType::Minus => Self::new(value, "-".to_string(), 0),
-                TokenType::Plus => Self::new(value, "+".to_string(), 0),
-                TokenType::Semicolon => Self::new(value, ";".to_string(), 0),
-                TokenType::ForwardSlash => Self::new(value, "/".to_string(), 0),
-                TokenType::Asterisk => Self::new(value, "*".to_string(), 0),
-                TokenType::Not => Self::new(value, "!".to_string(), 0),
-                TokenType::NotEqual => Self::new(value, "!=".to_string(), 0),
-                TokenType::Assignment => Self::new(value, "=".to_string(), 0),
-                TokenType::Equal => Self::new(value, "==".to_string(), 0),
-                TokenType::GreaterThan => Self::new(value, ">".to_string(), 0),
-                TokenType::GreaterThanOrEqual => Self::new(value, ">=".to_string(), 0),
-                TokenType::LessThan => Self::new(value, "<".to_string(), 0),
-                TokenType::LessThanOrEqual => Self::new(value, "<=".to_string(), 0),
-                TokenType::And => Self::new(value, "and".to_string(), 0),
-                // TokenType::Class => Self::new(value, "class".to_string(), 0),
-                TokenType::Else => Self::new(value, "else".to_string(), 0),
-                TokenType::False => Self::new(value, "false".to_string(), 0),
-                // TokenType::Function => Self::new(value, "fun".to_string(), 0),
-                // TokenType::For => Self::new(value, "for".to_string(), 0),
-                TokenType::If => Self::new(value, "if".to_string(), 0),
-                TokenType::Nil => Self::new(value, "nil".to_string(), 0),
-                TokenType::Or => Self::new(value, "or".to_string(), 0),
-                TokenType::Print => Self::new(value, "print".to_string(), 0),
-                // TokenType::Return => Self::new(value, "return".to_string(), 0),
-                // TokenType::Super => Self::new(value, "super".to_string(), 0),
-                TokenType::This => Self::new(value, "this".to_string(), 0),
-                TokenType::True => Self::new(value, "true".to_string(), 0),
-                TokenType::While => Self::new(value, "while".to_string(), 0),
+                TokenType::OpenParenthesis => Self::new(value, "(".to_string(), 0, 0),
+                TokenType::CloseParenthesis => Self::new(value, ")".to_string(), 0, 0),
+                TokenType::OpenBrace => Self::new(value, "{".to_string(), 0, 0),
+                TokenType::CloseBrace => Self::new(value, ")".to_string(), 0, 0),
+                TokenType::Comma => Self::new(value, ",".to_string(), 0, 0),
+                TokenType::Period => Self::new(value, ".".to_string(), 0, 0),
+                TokenType::Minus => Self::new(value, "-".to_string(), 0, 0),
+                TokenType::Plus => Self::new(value, "+".to_string(), 0, 0),
+                TokenType::Semicolon => Self::new(value, ";".to_string(), 0, 0),
+                TokenType::ForwardSlash => Self::new(value, "/".to_string(), 0, 0),
+                TokenType::Asterisk => Self::new(value, "*".to_string(), 0, 0),
+                TokenType::Not => Self::new(value, "!".to_string(), 0, 0),
+                TokenType::NotEqual => Self::new(value, "!=".to_string(), 0, 0),
+                TokenType::Assignment => Self::new(value, "=".to_string(), 0, 0),
+                TokenType::Equal => Self::new(value, "==".to_string(), 0, 0),
+                TokenType::GreaterThan => Self::new(value, ">".to_string(), 0, 0),
+                TokenType::GreaterThanOrEqual => Self::new(value, ">=".to_string(), 0, 0),
+                TokenType::LessThan => Self::new(value, "<".to_string(), 0, 0),
+                TokenType::LessThanOrEqual => Self::new(value, "<=".to_string(), 0, 0),
+                TokenType::And => Self::new(value, "and".to_string(), 0, 0),
+                // TokenType::Class => Self::new(value, "class".to_string(), 0, 0),
+                TokenType::Else => Self::new(value, "else".to_string(), 0, 0),
+                TokenType::False => Self::new(value, "false".to_string(), 0, 0),
+                // TokenType::Function => Self::new(value, "fun".to_string(), 0, 0),
+                TokenType::For => Self::new(value, "for".to_string(), 0, 0),
+                TokenType::If => Self::new(value, "if".to_string(), 0, 0),
+                TokenType::Nil => Self::new(value, "nil".to_string(), 0, 0),
+                TokenType::Or => Self::new(value, "or".to_string(), 0, 0),
+                TokenType::Print => Self::new(value, "print".to_string(), 0, 0),
+                // TokenType::Return => Self::new(value, "return".to_string(), 0, 0),
+                // TokenType::Super => Self::new(value, "super".to_string(), 0, 0),
+                TokenType::This => Self::new(value, "this".to_string(), 0, 0),
+                TokenType::True => Self::new(value, "true".to_string(), 0, 0),
+                TokenType::Variable => Self::new(value, "var".to_string(), 0, 0),
+                TokenType::While => Self::new(value, "while".to_string(), 0, 0),
                 _ => panic!(
                     "token type {:?} cannot be coerced into a token without more information",
                     value
@@ -992,13 +1245,13 @@ mod tests {
 
     impl Token {
         fn new_int(int: u8) -> Self {
-            Self::new_number(format!("{}", int), BigDecimal::from(int), 0)
+            Self::new_number(format!("{}", int), BigDecimal::from(int), 0, 0)
         }
     }
 
     impl From<String> for Token {
         fn from(value: String) -> Self {
-            Self::new_string(format!("\"{}\"", &value), value, 0)
+            Self::new_string(format!("\"{}\"", &value), value, 0, 0)
         }
     }
 

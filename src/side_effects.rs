@@ -1,6 +1,6 @@
 pub trait SideEffects {
     fn println(&mut self, text: &str);
-    // fn eprintln(&mut self, text: &str);
+    fn eprintln(&mut self, text: &str);
 }
 
 #[derive(Default)]
@@ -11,7 +11,7 @@ impl SideEffects for StandardSideEffects {
         println!("{}", text);
     }
 
-    // fn eprintln(&mut self, text: &str) {
-    //     eprintln!("{}", text);
-    // }
+    fn eprintln(&mut self, text: &str) {
+        eprintln!("{}", text);
+    }
 }

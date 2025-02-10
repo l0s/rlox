@@ -4,6 +4,7 @@ use crate::side_effects::SideEffects;
 use crate::statement::ExecutionError::{CannotRedefineVariable, Evaluation};
 use either::Either;
 use std::cell::RefCell;
+use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 
 // #[derive(Clone, Debug)]
@@ -85,6 +86,15 @@ impl VariableDeclarationStatement {
 pub(crate) enum ExecutionError {
     Evaluation(EvaluationError),
     CannotRedefineVariable(ExistsError),
+}
+
+impl Display for ExecutionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Evaluation(e) => write!(f, "Evaluation error: {}", e),
+            CannotRedefineVariable(e) => write!(f, "Cannot redefine variable: {}", e),
+        }
+    }
 }
 
 impl Statement {
@@ -721,9 +731,9 @@ mod tests {
             self.lines.push(text.to_string());
         }
 
-        // fn eprintln(&mut self, text: &str) {
-        //     eprintln!("{}", text);
-        // }
+        fn eprintln(&mut self, text: &str) {
+            eprintln!("{}", text);
+        }
     }
 
     impl From<u8> for Expression {

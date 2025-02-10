@@ -67,36 +67,40 @@ pub(crate) struct Token {
     pub literal_string: Option<String>,
     pub literal_number: Option<BigDecimal>,
     pub line: usize,
+    pub column: usize,
 }
 
 impl Token {
-    pub fn new(token_type: TokenType, lexeme: String, line: usize) -> Self {
+    pub fn new(token_type: TokenType, lexeme: String, line: usize, column: usize) -> Self {
         Self {
             token_type,
             lexeme,
             literal_string: None,
             literal_number: None,
             line,
+            column,
         }
     }
 
-    pub fn new_string(lexeme: String, literal: String, line: usize) -> Self {
+    pub fn new_string(lexeme: String, literal: String, line: usize, column: usize) -> Self {
         Self {
             token_type: TokenType::StringLiteral,
             lexeme,
             literal_string: Some(literal),
             literal_number: None,
             line,
+            column,
         }
     }
 
-    pub fn new_number(lexeme: String, literal: BigDecimal, line: usize) -> Self {
+    pub fn new_number(lexeme: String, literal: BigDecimal, line: usize, column: usize) -> Self {
         Self {
             token_type: TokenType::NumberLiteral,
             lexeme,
             literal_string: None,
             literal_number: Some(literal),
             line,
+            column,
         }
     }
 }

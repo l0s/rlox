@@ -17,6 +17,7 @@ pub(crate) struct Scanner<'a> {
     current: usize,
     line: usize,
     errors: Vec<LexicalError>,
+    column: usize,
 }
 
 impl<'a> From<&'a str> for Scanner<'a> {
@@ -28,6 +29,7 @@ impl<'a> From<&'a str> for Scanner<'a> {
             current: 0,
             line: 1,
             errors: vec![],
+            column: 0,
         }
     }
 }
@@ -72,8 +74,12 @@ impl<'a> Scanner<'a> {
             self.scan_token();
         }
 
-        self.tokens
-            .push(Token::new(TokenType::Eof, String::from(""), self.line));
+        self.tokens.push(Token::new(
+            TokenType::Eof,
+            String::from(""),
+            self.line,
+            self.column,
+        ));
     }
 
     ///
@@ -87,35 +93,80 @@ impl<'a> Scanner<'a> {
                 TokenType::OpenParenthesis,
                 lexeme,
                 self.line,
+                self.column,
             ))),
             ")" => Ok(Some(Token::new(
                 TokenType::CloseParenthesis,
                 lexeme,
                 self.line,
+                self.column,
             ))),
-            "{" => Ok(Some(Token::new(TokenType::OpenBrace, lexeme, self.line))),
-            "}" => Ok(Some(Token::new(TokenType::CloseBrace, lexeme, self.line))),
-            "," => Ok(Some(Token::new(TokenType::Comma, lexeme, self.line))),
-            "." => Ok(Some(Token::new(TokenType::Period, lexeme, self.line))),
-            "-" => Ok(Some(Token::new(TokenType::Minus, lexeme, self.line))),
-            "+" => Ok(Some(Token::new(TokenType::Plus, lexeme, self.line))),
-            ";" => Ok(Some(Token::new(TokenType::Semicolon, lexeme, self.line))),
-            "*" => Ok(Some(Token::new(TokenType::Asterisk, lexeme, self.line))),
+            "{" => Ok(Some(Token::new(
+                TokenType::OpenBrace,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "}" => Ok(Some(Token::new(
+                TokenType::CloseBrace,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "," => Ok(Some(Token::new(
+                TokenType::Comma,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "." => Ok(Some(Token::new(
+                TokenType::Period,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "-" => Ok(Some(Token::new(
+                TokenType::Minus,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "+" => Ok(Some(Token::new(
+                TokenType::Plus,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            ";" => Ok(Some(Token::new(
+                TokenType::Semicolon,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
+            "*" => Ok(Some(Token::new(
+                TokenType::Asterisk,
+                lexeme,
+                self.line,
+                self.column,
+            ))),
             // one or two-character lexemes
             "!" => Ok(Some(Token::new(
                 self.conditional_advance("=", TokenType::NotEqual, TokenType::Not),
                 lexeme,
                 self.line,
+                self.column,
             ))),
             "=" => Ok(Some(Token::new(
                 self.conditional_advance("=", TokenType::Equal, TokenType::Assignment),
                 lexeme,
                 self.line,
+                self.column,
             ))),
             "<" => Ok(Some(Token::new(
                 self.conditional_advance("=", TokenType::LessThanOrEqual, TokenType::LessThan),
                 lexeme,
                 self.line,
+                self.column,
             ))),
             ">" => Ok(Some(Token::new(
                 self.conditional_advance(
@@ -125,6 +176,7 @@ impl<'a> Scanner<'a> {
                 ),
                 lexeme,
                 self.line,
+                self.column,
             ))),
             // 1+ length lexemes
             "/" => {
@@ -136,10 +188,12 @@ impl<'a> Scanner<'a> {
                     match next {
                         "/" => {
                             self.current += 1;
+                            self.column += 1;
                             TokenType::LineComment
                         }
                         "*" => {
                             self.current += 1;
+                            self.column += 1;
                             TokenType::BlockComment
                         }
                         _ => TokenType::ForwardSlash,
@@ -151,7 +205,7 @@ impl<'a> Scanner<'a> {
                     self.block_comment()
                 } else {
                     // TokenType::ForwardSlash
-                    Ok(Some(Token::new(token_type, lexeme, self.line)))
+                    Ok(Some(Token::new(token_type, lexeme, self.line, self.column)))
                 }
             }
             // arbitrary-length lexemes
@@ -160,6 +214,7 @@ impl<'a> Scanner<'a> {
             " " | "\r" | "\t" => Ok(None),
             "\n" => {
                 self.line += 1;
+                self.column = 0;
                 Ok(None)
             }
             "" => Ok(None), // this happens at the end of the file
@@ -191,6 +246,7 @@ impl<'a> Scanner<'a> {
         while !self.at_end() && self.peek() != "*" && self.peek_next() != "/" {
             if self.peek() == "\n" {
                 self.line += 1;
+                self.column = 0;
             }
             self.advance();
         }
@@ -224,6 +280,7 @@ impl<'a> Scanner<'a> {
         while self.peek() != "\"" && !self.at_end() {
             if self.peek() == "\n" {
                 self.line += 1;
+                self.column = 0;
             }
             self.advance();
         }
@@ -240,6 +297,7 @@ impl<'a> Scanner<'a> {
             self.current_lexeme(),
             value,
             self.line,
+            self.column,
         )))
     }
 
@@ -284,7 +342,12 @@ impl<'a> Scanner<'a> {
         let string = self.graphemes[self.start..self.current].join("");
         let result = BigDecimal::from_str(&string);
         match result {
-            Ok(literal) => Ok(Some(Token::new_number(string, literal, self.line))),
+            Ok(literal) => Ok(Some(Token::new_number(
+                string,
+                literal,
+                self.line,
+                self.column,
+            ))),
             Err(parse_error) => Err(LexicalError {
                 line: self.line,
                 message: format!("Error parsing number literal: {}", parse_error),
@@ -302,7 +365,7 @@ impl<'a> Scanner<'a> {
         } else {
             TokenType::Identifier
         };
-        Ok(Some(Token::new(token_type, string, self.line))) // TODO should we have a dedicated identifier field?
+        Ok(Some(Token::new(token_type, string, self.line, self.column))) // TODO should we have a dedicated identifier field?
     }
 
     /// Test if the next character matches what is expected and if so, advance the cursor
@@ -316,6 +379,7 @@ impl<'a> Scanner<'a> {
             return type_otherwise;
         }
         self.current += 1;
+        self.column += 1;
         type_on_match
     }
 
@@ -340,6 +404,7 @@ impl<'a> Scanner<'a> {
 
     fn advance(&mut self) -> &'a str {
         self.current += 1;
+        self.column += 1;
         if self.at_end() {
             return "";
         }

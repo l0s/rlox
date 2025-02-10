@@ -2,6 +2,7 @@ use crate::grammar::EvaluationResult;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 
 /// The scope for variables
@@ -21,6 +22,12 @@ pub(crate) struct UndefinedError;
 /// Note: redefining a variable is allowed in the global scope only.
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) struct ExistsError;
+
+impl Display for ExistsError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Attempted to redefine a variable that already exists in the local scope. This is only permitted in the global scope.")
+    }
+}
 
 impl Environment {
     /// Define a new variable or, if this is the global scope, redefine an existing variable.
