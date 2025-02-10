@@ -321,8 +321,7 @@ impl Statement {
 mod tests {
     use super::Statement::{Block, Break, Continue, For, Print};
     use super::{ExecutionError, Statement, VariableDeclarationStatement};
-    use crate::environment::Environment;
-    use crate::grammar::Expression::VariableReference;
+    use crate::environment::{Environment, NotInALoopError};
     use crate::grammar::{BinaryOperator, EvaluationError, EvaluationResult, Expression, Literal};
     use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One, Zero};
@@ -358,12 +357,20 @@ mod tests {
 
     unsuccessful_execution_tests! {
         use_variable_before_declaration: (
-            Statement::Print(Expression::VariableReference("a".to_string())),
+            Print(Expression::VariableReference("a".to_string())),
             ExecutionError::Evaluation(EvaluationError::Undefined),
         ),
         assignment_without_declaration: (
             Statement::Expression(Expression::Assignment("a".to_string(), Box::new(BigDecimal::one().into()))),
             ExecutionError::Evaluation(EvaluationError::Undefined),
+        ),
+        break_outside_loop: (
+            Break,
+            ExecutionError::NotInALoop(NotInALoopError),
+        ),
+        continue_outside_loop: (
+            Continue,
+            ExecutionError::NotInALoop(NotInALoopError),
         ),
     }
 
@@ -898,7 +905,7 @@ mod tests {
             }),
         );
         let block = Block(vec![
-            Print(VariableReference("i".to_string())),
+            Print(Expression::VariableReference("i".to_string())),
             Continue,
             Print(Expression::Literal(Literal::String(
                 "Don't print me".to_string(),

@@ -1243,6 +1243,8 @@ mod tests {
                 TokenType::True => Self::new(value, "true".to_string(), 0, 0),
                 TokenType::Variable => Self::new(value, "var".to_string(), 0, 0),
                 TokenType::While => Self::new(value, "while".to_string(), 0, 0),
+                TokenType::Break => Self::new(value, "break".to_string(), 0, 0),
+                TokenType::Continue => Self::new(value, "continue".to_string(), 0, 0),
                 _ => panic!(
                     "token type {:?} cannot be coerced into a token without more information",
                     value
