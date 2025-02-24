@@ -7,7 +7,7 @@ description = "Interpreter for the Lox language: https://craftinginterpreters.co
 
 [dependencies]
 bigdecimal = "0.4.7"
-either = "1.13.0"
+either = "1.14.0"
 itertools = "0.14.0"
 phf = { version = "0.11.3", features = ["macros"] }
 unicode-segmentation = "1.12.0"
