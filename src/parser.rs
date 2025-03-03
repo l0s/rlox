@@ -1,8 +1,11 @@
 use crate::grammar::{BinaryOperator, Expression, Literal, UnaryOperator};
+use crate::parser::FunctionKind::Function;
 use crate::parser::ParseError::{
     InvalidAssignmentTarget, InvalidBinaryOperator, InvalidLiteral, InvalidPrimaryToken,
-    InvalidUnaryOperator, MissingCondition, MissingForParameters, MissingSemicolonAfterInitializer,
-    MissingSemicolonAfterLoopCondition, UnclosedCondition, UnclosedForParameters, UnclosedGrouping,
+    InvalidUnaryOperator, MissingCondition, MissingForParameters, MissingFunctionBody,
+    MissingFunctionName, MissingFunctionParameters, MissingParameterName,
+    MissingSemicolonAfterInitializer, MissingSemicolonAfterLoopCondition, TooManyFunctionArguments,
+    UnclosedCondition, UnclosedForParameters, UnclosedFunctionParameters, UnclosedGrouping,
     UnterminatedBlock, UnterminatedStatement, VariableNameExpected,
 };
 use crate::statement::{Statement, VariableDeclarationStatement};
@@ -48,6 +51,15 @@ pub(crate) enum ParseError {
     UnclosedForParameters,
     MissingSemicolonAfterLoopCondition,
     MissingSemicolonAfterInitializer,
+    /// Missing ')' after arguments
+    UnclosedFunctionCall,
+    /// Functions cannot have more than 255 arguments
+    TooManyFunctionArguments,
+    MissingFunctionName(FunctionKind),
+    MissingFunctionParameters(FunctionKind),
+    UnclosedFunctionParameters(FunctionKind),
+    MissingParameterName,
+    MissingFunctionBody(FunctionKind),
 }
 
 impl Display for ParseError {
@@ -76,6 +88,13 @@ impl Display for ParseError {
             MissingSemicolonAfterInitializer => {
                 write!(f, "Missing semicolon after loop initializer")
             }
+            Self::UnclosedFunctionCall => write!(f, "Missing ')' after function arguments"),
+            TooManyFunctionArguments => write!(f, "Too many function arguments"),
+            MissingFunctionName(kind) => write!(f, "Missing name for {}", kind),
+            MissingFunctionParameters(kind) => write!(f, "Missing parameters for {}", kind),
+            UnclosedFunctionParameters(kind) => write!(f, "Missing ')' after {} parameters", kind),
+            MissingParameterName => write!(f, "Missing parameter name"),
+            MissingFunctionBody(kind) => write!(f, "Missing body for {}", kind),
         }
     }
 }
@@ -145,8 +164,26 @@ impl TryInto<Vec<Statement>> for Parser {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FunctionKind {
+    Function,
+    // Method,
+}
+
+impl Display for FunctionKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Function => write!(f, "function"),
+            // Self::Method => write!(f, "method"),
+        }
+    }
+}
+
 impl Parser {
     fn declaration(&mut self) -> Result<Option<Statement>, ParseError> {
+        if self.token_match(&[TokenType::Function]) {
+            return self.function(Function).map(Some);
+        }
         if self.token_match(&[TokenType::Variable]) {
             return self.variable_declaration().map(Some);
         }
@@ -157,6 +194,41 @@ impl Parser {
                 Err(e)
             }
         }
+    }
+
+    fn function(&mut self, kind: FunctionKind) -> Result<Statement, ParseError> {
+        let name = self
+            .consume(&TokenType::Identifier, MissingFunctionName(kind))?
+            .lexeme
+            .clone();
+        self.consume(&TokenType::OpenParenthesis, MissingFunctionParameters(kind))?;
+        let mut parameters = vec![];
+        if !self.check(&TokenType::CloseParenthesis) {
+            loop {
+                if parameters.len() >= 255 {
+                    return Err(TooManyFunctionArguments);
+                }
+                let parameter_token = self.consume(&TokenType::Identifier, MissingParameterName)?;
+                parameters.push(parameter_token.clone());
+                if !self.token_match(&[TokenType::Comma]) {
+                    break;
+                }
+            }
+        }
+        self.consume(
+            &TokenType::CloseParenthesis,
+            UnclosedFunctionParameters(kind),
+        )?;
+        self.consume(&TokenType::OpenBrace, MissingFunctionBody(kind))?;
+        let statements = vec![self.block()?];
+        Ok(Statement::Function {
+            name,
+            parameter_names: parameters
+                .into_iter()
+                .map(|parameter| parameter.lexeme)
+                .collect(),
+            statements,
+        })
     }
 
     /// Parse a variable declaration and optional initialization including the trailing semicolon.
@@ -424,8 +496,50 @@ impl Parser {
                 Box::new(operand),
             ))
         } else {
-            self.primary()
+            self.call()
         }
+    }
+
+    fn call(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.primary()?;
+
+        loop {
+            if self.token_match(&[TokenType::OpenParenthesis]) {
+                expression = self.finish_call(expression)?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(expression)
+    }
+
+    fn finish_call(&mut self, callee: Expression) -> Result<Expression, ParseError> {
+        let mut arguments = vec![];
+
+        if !self.check(&TokenType::CloseParenthesis) {
+            loop {
+                if arguments.len() >= 255 {
+                    // FIXME this should not be a parse error
+                    // TODO create warning mechanism
+                    return Err(TooManyFunctionArguments);
+                }
+                arguments.push(self.expression()?);
+                if !self.token_match(&[TokenType::Comma]) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(
+            &TokenType::CloseParenthesis,
+            ParseError::UnclosedFunctionCall,
+        )?;
+
+        Ok(Expression::Call {
+            callee: Box::new(callee),
+            arguments,
+        })
     }
 
     fn primary(&mut self) -> Result<Expression, ParseError> {

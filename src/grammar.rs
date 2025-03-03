@@ -1,8 +1,17 @@
-use crate::environment::Environment;
+use crate::callable::{Callable, Callables};
+use crate::environment::{Environment, ExistsError, NotInALoopError};
+use crate::grammar::EvaluationError::{
+    CannotRedefineVariable, IncorrectNumberOfArguments, NotAFunction, NotInALoop,
+};
+use crate::side_effects::SideEffects;
+use crate::statement::Statement;
 use bigdecimal::{BigDecimal, Zero};
+use itertools::Itertools;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::rc::Rc;
 use std::str::FromStr;
 use EvaluationError::{DivideByZero, NilValue, TypeMismatch, Undefined};
 
@@ -16,6 +25,12 @@ pub(crate) enum Expression {
         right_value: Box<Expression>,
     },
     Unary(UnaryOperator, Box<Expression>),
+    /// A function invocation
+    Call {
+        /// The function being executed
+        callee: Box<Expression>,
+        arguments: Vec<Expression>,
+    },
     Binary {
         operator: BinaryOperator,
         left_value: Box<Expression>,
@@ -30,32 +45,38 @@ pub(crate) enum Expression {
 impl Expression {
     pub fn evaluate(
         &self,
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
     ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            Expression::Literal(literal) => Ok(literal.clone().into()),
-            Expression::Logical {
+            Self::Literal(literal) => Ok(literal.clone().into()),
+            Self::Logical {
                 operator,
                 left_value,
                 right_value,
-            } => operator.evaluate(environment, left_value, right_value),
-            Expression::Unary(operator, operand) => operator.evaluate(environment, operand),
-            Expression::Binary {
+            } => operator.evaluate(environment, side_effects, left_value, right_value),
+            Self::Unary(operator, operand) => operator.evaluate(environment, side_effects, operand),
+            Self::Call { callee, arguments } => {
+                let callee = callee.evaluate(environment.clone(), side_effects.clone())?;
+                callee.invoke(environment, side_effects, arguments)
+            }
+            Self::Binary {
                 operator,
                 left_value,
                 right_value,
-            } => operator.evaluate(environment, left_value, right_value),
-            Expression::Grouping(expression) => expression.evaluate(environment),
-            Expression::VariableReference(name) => {
-                if let Ok(value) = environment.get(name) {
+            } => operator.evaluate(environment, side_effects, left_value, right_value),
+            Self::Grouping(expression) => expression.evaluate(environment, side_effects),
+            Self::VariableReference(name) => {
+                if let Ok(value) = environment.borrow().get(name) {
                     Ok(value)
                 } else {
                     Err(Undefined)
                 }
             }
-            Expression::Assignment(identifier, expression) => {
-                let result = expression.evaluate(environment)?;
+            Self::Assignment(identifier, expression) => {
+                let result = expression.evaluate(environment.clone(), side_effects)?;
                 environment
+                    .borrow_mut()
                     .assign(identifier.clone(), result.clone())
                     .map_err(|_| Undefined)?;
                 Ok(result)
@@ -93,6 +114,17 @@ impl Debug for Expression {
                 UnaryOperator::Negative => write!(f, "(- {:?})", expression),
                 UnaryOperator::Not => write!(f, "(! {:?})", expression),
             },
+            Self::Call { callee, arguments } => {
+                if arguments.is_empty() {
+                    write!(f, "( {:?} )", callee)
+                } else {
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| format!("{:?}", argument))
+                        .join(", ");
+                    write!(f, "( {:?}: {} )", callee, arguments)
+                }
+            }
             Self::Binary {
                 operator,
                 left_value,
@@ -115,7 +147,7 @@ impl Debug for Expression {
                 write!(f, "({} {:?} {:?})", symbol, left_value, right_value)
             }
             Self::Grouping(expression) => write!(f, "(group {:?})", expression),
-            Self::VariableReference(name) => write!(f, "(var {})", name),
+            Self::VariableReference(name) => write!(f, "(get {})", name),
             Self::Assignment(identifier, expression) => {
                 write!(f, "(set {} {:?})", identifier, expression)
             }
@@ -130,6 +162,13 @@ pub enum EvaluationError {
     DivideByZero,
     /// The expression refers to an undefined variable
     Undefined,
+    /// Function call specifies the wrong number of arguments
+    IncorrectNumberOfArguments(usize, usize),
+    /// Tried to invoke a value that is not a function
+    NotAFunction,
+    CannotRedefineVariable(ExistsError),
+    /// Attempted to use a `break` or `continue` statement outside the context of a loop.
+    NotInALoop(NotInALoopError),
 }
 
 impl Display for EvaluationError {
@@ -139,6 +178,19 @@ impl Display for EvaluationError {
             NilValue => write!(f, "Attempted to use nil value"),
             DivideByZero => write!(f, "Attempted to divide by zero"),
             Undefined => write!(f, "Expression refers to an undefined variable"),
+            IncorrectNumberOfArguments(expected, found) => write!(
+                f,
+                "Incorrect argument count, expected: {}, found: {}",
+                expected, found
+            ),
+            NotAFunction => write!(f, "Expression is not a function"),
+            CannotRedefineVariable(error) => write!(f, "Cannot redefine variable: {}", error),
+            // FIXME Display dependent on Debug
+            NotInALoop(e) => write!(
+                f,
+                "Encountered `break` or `continue` outside a loop: {:?}",
+                e
+            ),
         }
     }
 }
@@ -164,41 +216,51 @@ pub(crate) enum BinaryOperator {
 impl BinaryOperator {
     pub fn evaluate(
         &self,
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         left_value: &Expression,
         right_value: &Expression,
     ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            BinaryOperator::Equal => Ok(EvaluationResult::Boolean(
-                left_value.evaluate(environment)? == right_value.evaluate(environment)?,
+            Self::Equal => Ok(EvaluationResult::Boolean(
+                left_value.evaluate(environment.clone(), side_effects.clone())?
+                    == right_value.evaluate(environment, side_effects)?,
             )),
-            BinaryOperator::NotEqual => Ok(EvaluationResult::Boolean(
-                left_value.evaluate(environment)? != right_value.evaluate(environment)?,
+            Self::NotEqual => Ok(EvaluationResult::Boolean(
+                left_value.evaluate(environment.clone(), side_effects.clone())?
+                    != right_value.evaluate(environment, side_effects)?,
             )),
-            BinaryOperator::LessThan => {
-                Self::evaluate_inequality(environment, left_value, right_value, &[Ordering::Less])
-            }
-            BinaryOperator::GreaterThan => Self::evaluate_inequality(
+            Self::LessThan => Self::evaluate_inequality(
                 environment,
+                side_effects,
+                left_value,
+                right_value,
+                &[Ordering::Less],
+            ),
+            Self::GreaterThan => Self::evaluate_inequality(
+                environment,
+                side_effects,
                 left_value,
                 right_value,
                 &[Ordering::Greater],
             ),
-            BinaryOperator::LessThanOrEqual => Self::evaluate_inequality(
+            Self::LessThanOrEqual => Self::evaluate_inequality(
                 environment,
+                side_effects,
                 left_value,
                 right_value,
                 &[Ordering::Less, Ordering::Equal],
             ),
-            BinaryOperator::GreaterThanOrEqual => Self::evaluate_inequality(
+            Self::GreaterThanOrEqual => Self::evaluate_inequality(
                 environment,
+                side_effects,
                 left_value,
                 right_value,
                 &[Ordering::Greater, Ordering::Equal],
             ),
-            BinaryOperator::Add => {
-                let left = left_value.evaluate(environment)?;
-                let right = right_value.evaluate(environment)?;
+            Self::Add => {
+                let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
+                let right = right_value.evaluate(environment, side_effects)?;
                 fn as_string(evaluation_result: &EvaluationResult) -> String {
                     // Note: this logic differs from `Display`
                     match evaluation_result {
@@ -206,6 +268,8 @@ impl BinaryOperator {
                         EvaluationResult::String(value) => value.to_string(),
                         EvaluationResult::Boolean(value) => value.to_string(),
                         EvaluationResult::Nil => "".to_string(),
+                        EvaluationResult::Function(definition) => definition.to_string(),
+                        EvaluationResult::Unit => "()".to_string(),
                     }
                 }
                 match (left, right) {
@@ -224,15 +288,23 @@ impl BinaryOperator {
                     (_, _) => Err(TypeMismatch),
                 }
             }
-            BinaryOperator::Subtract => {
-                Self::perform_arithmetic(environment, left_value, right_value, |x, y| x.sub(y))
-            }
-            BinaryOperator::Multiply => {
-                Self::perform_arithmetic(environment, left_value, right_value, |x, y| x.mul(y))
-            }
-            BinaryOperator::Divide => {
-                let left = left_value.evaluate(environment)?;
-                let right = right_value.evaluate(environment)?;
+            Self::Subtract => Self::perform_arithmetic(
+                environment,
+                side_effects,
+                left_value,
+                right_value,
+                |x, y| x.sub(y),
+            ),
+            Self::Multiply => Self::perform_arithmetic(
+                environment,
+                side_effects,
+                left_value,
+                right_value,
+                |x, y| x.mul(y),
+            ),
+            Self::Divide => {
+                let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
+                let right = right_value.evaluate(environment, side_effects)?;
                 match (left, right) {
                     (
                         EvaluationResult::Number(numerator),
@@ -248,34 +320,36 @@ impl BinaryOperator {
                     (_, _) => Err(TypeMismatch),
                 }
             }
-            BinaryOperator::And => {
-                let left = left_value.evaluate(environment)?;
+            Self::And => {
+                let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
                 if !left.is_truthful() {
                     Ok(left)
                 } else {
-                    Ok(right_value.evaluate(environment)?)
+                    Ok(right_value.evaluate(environment, side_effects)?)
                 }
             }
-            BinaryOperator::Or => {
-                let left = left_value.evaluate(environment)?;
+            Self::Or => {
+                let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
                 if left.is_truthful() {
                     Ok(left)
                 } else {
-                    Ok(right_value.evaluate(environment)?)
+                    Ok(right_value.evaluate(environment, side_effects)?)
                 }
             }
         }
     }
 
     fn perform_arithmetic(
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         left_value: &Expression,
         right_value: &Expression,
         operation: fn(BigDecimal, BigDecimal) -> BigDecimal,
     ) -> Result<EvaluationResult, EvaluationError> {
-        let left = left_value.evaluate(environment)?;
-        let right = right_value.evaluate(environment)?;
+        let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
+        let right = right_value.evaluate(environment, side_effects)?;
         match (left, right) {
+            // TODO will this fail early (short circuit) if one of these is NaN?
             (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
                 Ok(EvaluationResult::Number(operation(x, y)))
             }
@@ -285,14 +359,15 @@ impl BinaryOperator {
     }
 
     fn evaluate_inequality(
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         left_value: &Expression,
         right_value: &Expression,
         expected: &[Ordering],
     ) -> Result<EvaluationResult, EvaluationError> {
         match (
-            left_value.evaluate(environment)?,
-            right_value.evaluate(environment)?,
+            left_value.evaluate(environment.clone(), side_effects.clone())?,
+            right_value.evaluate(environment, side_effects)?,
         ) {
             // TODO will this fail early (short circuit) if one of these is NaN?
             (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
@@ -313,12 +388,13 @@ pub(crate) enum UnaryOperator {
 impl UnaryOperator {
     pub fn evaluate(
         &self,
-        environment: &mut Environment,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         input: &Expression,
     ) -> Result<EvaluationResult, EvaluationError> {
         match self {
             UnaryOperator::Negative => {
-                let operand = input.evaluate(environment)?;
+                let operand = input.evaluate(environment, side_effects)?;
                 if let EvaluationResult::Number(operand) = operand {
                     Ok(EvaluationResult::Number(operand.neg()))
                 } else {
@@ -326,7 +402,7 @@ impl UnaryOperator {
                 }
             }
             UnaryOperator::Not => {
-                let operand = input.evaluate(environment)?;
+                let operand = input.evaluate(environment, side_effects)?;
                 Ok(EvaluationResult::Boolean(!operand.is_truthful()))
             }
         }
@@ -422,6 +498,55 @@ pub(crate) enum EvaluationResult {
     String(String),
     Boolean(bool),
     Nil,
+    Function(Callables),
+    /// The type returned by a function that does not return a value
+    Unit,
+}
+
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub(crate) struct FunctionDefinition {
+    pub(crate) name: String,
+    pub(crate) parameter_names: Vec<String>,
+    pub(crate) statements: Vec<Statement>,
+}
+
+impl From<FunctionDefinition> for EvaluationResult {
+    fn from(value: FunctionDefinition) -> Self {
+        EvaluationResult::Function(Callables::UserDefinedFunction(value))
+    }
+}
+
+impl Callable for FunctionDefinition {
+    fn arity(&self) -> usize {
+        self.parameter_names.len()
+    }
+
+    fn parameter_name<'s>(&self, index: usize) -> String {
+        self.parameter_names[index].clone()
+    }
+
+    fn unchecked_call(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
+    ) -> Result<EvaluationResult, EvaluationError> {
+        for statement in &self.statements {
+            statement.execute(environment.clone(), side_effects.clone())?;
+        }
+
+        // TODO need to extract return value if one exists
+        Ok(EvaluationResult::Unit)
+    }
+}
+
+impl Display for FunctionDefinition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.parameter_names.is_empty() {
+            write!(f, "( {} )", self.name)
+        } else {
+            write!(f, "( {}: {} )", self.name, self.parameter_names.join(", "))
+        }
+    }
 }
 
 impl Display for EvaluationResult {
@@ -431,6 +556,8 @@ impl Display for EvaluationResult {
             Self::String(value) => f.write_str(value),
             Self::Boolean(value) => write!(f, "{}", value),
             Self::Nil => f.write_str("nil"),
+            Self::Function(definition) => write!(f, "{}", definition),
+            Self::Unit => write!(f, "()"),
         }
     }
 }
@@ -438,10 +565,24 @@ impl Display for EvaluationResult {
 impl EvaluationResult {
     pub fn is_truthful(&self) -> bool {
         match self {
-            EvaluationResult::Number(_) => true,
-            EvaluationResult::String(_) => true,
-            EvaluationResult::Boolean(value) => *value,
-            EvaluationResult::Nil => false,
+            Self::Number(_) => true,
+            Self::String(_) => true,
+            Self::Boolean(value) => *value,
+            Self::Nil => false,
+            Self::Function { .. } => true,
+            Self::Unit => false,
+        }
+    }
+
+    pub fn invoke(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
+        arguments: &[Expression],
+    ) -> Result<EvaluationResult, EvaluationError> {
+        match self {
+            Self::Function(definition) => definition.call(environment, side_effects, arguments),
+            _ => Err(NotAFunction),
         }
     }
 }
@@ -452,12 +593,20 @@ mod tests {
         Add, Divide, Equal, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Multiply,
         NotEqual, Subtract,
     };
-    use super::EvaluationError::{DivideByZero, NilValue, TypeMismatch};
+    use super::EvaluationError::{DivideByZero, NilValue, NotAFunction, TypeMismatch};
     use super::Literal::Nil;
-    use super::{EvaluationError, EvaluationResult, Expression, UnaryOperator};
+    use super::{
+        BinaryOperator, EvaluationError, EvaluationResult, Expression, FunctionDefinition,
+        UnaryOperator,
+    };
+    use crate::callable::Callables;
     use crate::environment::Environment;
+    use crate::side_effects::SideEffects;
+    use crate::statement::Statement;
     use bigdecimal::{BigDecimal, FromPrimitive, One, Zero};
+    use std::cell::RefCell;
     use std::ops::{Neg, Sub};
+    use std::rc::Rc;
     use std::str::FromStr;
 
     #[test]
@@ -483,10 +632,11 @@ mod tests {
 
     fn successful_evaluation_test(expression: &Expression, expected: &EvaluationResult) {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
 
         // when
-        let result = expression.evaluate(&mut environment).unwrap();
+        let result = expression.evaluate(environment, side_effects).unwrap();
 
         // then
         assert_eq!(
@@ -498,10 +648,11 @@ mod tests {
 
     fn unsuccessful_evaluation_test(expression: &Expression, expected: &EvaluationError) {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
 
         // when
-        let result = expression.evaluate(&mut environment).unwrap_err();
+        let result = expression.evaluate(environment, side_effects).unwrap_err();
 
         // then
         assert_eq!(
@@ -769,12 +920,20 @@ mod tests {
             },
             NilValue,
         ),
+        cannot_invoke_non_function: (
+            Expression::Call {
+                callee: Box::new("not_a_function".to_string().into()),
+                arguments: vec![],
+            },
+            NotAFunction,
+        ),
     }
 
     #[test]
     fn addition() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let expression = Expression::Binary {
             operator: Add,
             left_value: Box::new(BigDecimal::from_f64(std::f64::consts::PI).unwrap().into()),
@@ -783,7 +942,7 @@ mod tests {
 
         // when
         let result = expression
-            .evaluate(&mut environment)
+            .evaluate(environment, side_effects)
             .expect("unable to evaluate addition expression");
 
         // then
@@ -797,7 +956,8 @@ mod tests {
     #[test]
     fn subtraction() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let expression = Expression::Binary {
             operator: Subtract,
             left_value: Box::new(BigDecimal::from_f64(std::f64::consts::TAU).unwrap().into()),
@@ -806,7 +966,7 @@ mod tests {
 
         // when
         let result = expression
-            .evaluate(&mut environment)
+            .evaluate(environment, side_effects)
             .expect("unable to evaluate subtraction expression");
 
         // then
@@ -820,7 +980,8 @@ mod tests {
     #[test]
     fn multiplication() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let expression = Expression::Binary {
             operator: Multiply,
             left_value: Box::new(BigDecimal::from(2).into()),
@@ -829,7 +990,7 @@ mod tests {
 
         // when
         let result = expression
-            .evaluate(&mut environment)
+            .evaluate(environment, side_effects)
             .expect("unable to evaluate multiplication expression");
 
         // then
@@ -843,7 +1004,8 @@ mod tests {
     #[test]
     fn division() {
         // given
-        let mut environment = Environment::default();
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let expression = Expression::Binary {
             operator: Divide,
             left_value: Box::new(BigDecimal::from_f64(std::f64::consts::TAU).unwrap().into()),
@@ -852,7 +1014,7 @@ mod tests {
 
         // when
         let result = expression
-            .evaluate(&mut environment)
+            .evaluate(environment, side_effects)
             .expect("unable to evaluate division expression");
 
         // then
@@ -861,5 +1023,90 @@ mod tests {
             EvaluationResult::Number(number)
             if number.clone().sub(BigDecimal::from_f64(std::f64::consts::PI).unwrap()).abs() < BigDecimal::from_f64(0.0000000001).unwrap()
         ))
+    }
+
+    #[test]
+    fn function_call() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let definition = FunctionDefinition {
+            name: "add".to_string(),
+            parameter_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            statements: vec![Statement::Print(Expression::Binary {
+                operator: BinaryOperator::Add,
+                left_value: Box::new(Expression::Binary {
+                    operator: BinaryOperator::Add,
+                    left_value: Box::new(Expression::VariableReference("a".to_string())),
+                    right_value: Box::new(Expression::VariableReference("b".to_string())),
+                }),
+                right_value: Box::new(Expression::VariableReference("c".to_string())),
+            })],
+        };
+        environment
+            .borrow_mut()
+            .define(
+                "add".to_string(),
+                EvaluationResult::Function(Callables::UserDefinedFunction(definition)),
+            )
+            .expect("Unable to define function");
+        let function_call = Expression::Call {
+            callee: Box::new(Expression::VariableReference("add".to_string())),
+            arguments: vec![1.into(), 2.into(), 3.into()],
+        };
+
+        // when
+        let result = function_call
+            .evaluate(environment, side_effects.clone())
+            .expect("Unable to execute function");
+
+        // then
+        assert!(matches!(result, EvaluationResult::Unit));
+        assert_eq!(side_effects.borrow().lines.len(), 1);
+        assert_eq!(side_effects.borrow().lines[0], "6e0");
+    }
+
+    #[test]
+    fn truthful_results() {
+        let results = [
+            EvaluationResult::Number(BigDecimal::zero()),
+            EvaluationResult::Number(BigDecimal::one()),
+            EvaluationResult::String("".to_string()),
+            EvaluationResult::Boolean(true),
+            EvaluationResult::Function(Callables::UserDefinedFunction(FunctionDefinition {
+                name: "program_halts".to_string(),
+                parameter_names: vec!["source_code".to_string()],
+                statements: vec![],
+            })),
+        ];
+        for result in results {
+            assert!(result.is_truthful());
+        }
+    }
+
+    #[test]
+    fn untruthful_results() {
+        let results = [
+            EvaluationResult::Boolean(false),
+            EvaluationResult::Unit,
+            EvaluationResult::Nil,
+        ];
+        for result in results {
+            assert!(!result.is_truthful());
+        }
+    }
+    #[derive(Clone, Default)]
+    struct TestSideEffects {
+        lines: Vec<String>,
+    }
+
+    impl SideEffects for TestSideEffects {
+        fn println(&mut self, text: &str) {
+            self.lines.push(text.to_string());
+        }
+
+        fn eprintln(&mut self, text: &str) {
+            self.lines.push(text.to_string());
+        }
     }
 }

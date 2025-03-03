@@ -8,10 +8,14 @@ use std::rc::Rc;
 /// The scope for variables
 #[derive(Default)]
 pub(crate) struct Environment {
-    /// If `None`, then the environment is the global scope, otherwise
+    /// If `None`, then the environment is the global scope, otherwise the environment from which
+    /// this one inherits
     parent: Option<Rc<RefCell<Self>>>,
     values: HashMap<String, EvaluationResult>,
     loop_control: Option<Rc<RefCell<LoopControl>>>,
+    /// If `None`, then this environment is the global scope, otherwise, a pointer to the root
+    /// environment
+    global: Option<Rc<RefCell<Self>>>,
 }
 
 #[derive(Default)]
@@ -27,11 +31,11 @@ pub(crate) struct UndefinedError;
 /// Attempted to redefine a variable that already exists in the local scope
 ///
 /// Note: redefining a variable is allowed in the global scope only.
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Copy, Clone)]
 pub(crate) struct ExistsError;
 
 /// Attempted to use a `break` or `continue` statement outside the context of a loop
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Copy, Clone)]
 pub(crate) struct NotInALoopError;
 
 impl Display for ExistsError {
@@ -124,11 +128,20 @@ impl Environment {
         }
     }
 
+    pub fn global_scope(environment: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
+        match environment.borrow().global.clone() {
+            None => environment.clone(), // this is the global scope
+            Some(global) => global.clone(),
+        }
+    }
+
     pub fn new_nested_scope(parent: Rc<RefCell<Self>>) -> Self {
+        let loop_control = parent.borrow().loop_control.clone();
         Self {
             parent: Some(parent.clone()),
             values: Default::default(),
-            loop_control: parent.borrow().loop_control.clone(),
+            loop_control,
+            global: Some(Environment::global_scope(parent)),
         }
     }
 
@@ -140,6 +153,7 @@ impl Environment {
             parent: Some(parent.clone()),
             values: Default::default(),
             loop_control: Some(loop_control.clone()),
+            global: Some(Environment::global_scope(parent)),
         }
     }
 }

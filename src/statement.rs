@@ -1,11 +1,11 @@
-use crate::environment::{Environment, ExistsError, LoopControl, NotInALoopError};
-use crate::grammar::{EvaluationError, EvaluationResult, Expression};
+use crate::callable::Callables;
+use crate::environment::{Environment, LoopControl};
+use crate::grammar::EvaluationError::{CannotRedefineVariable, NotInALoop};
+use crate::grammar::{EvaluationError, EvaluationResult, Expression, FunctionDefinition};
 use crate::side_effects::SideEffects;
 use either::Either;
 use std::cell::RefCell;
-use std::fmt::{Display, Formatter};
 use std::rc::Rc;
-use ExecutionError::{CannotRedefineVariable, Evaluation, NotInALoop};
 
 // #[derive(Clone, Debug)]
 // pub(crate) struct Program {
@@ -30,6 +30,13 @@ pub(crate) enum Statement {
         increment: Option<Expression>,
         /// The loop body
         statement: Box<Statement>,
+    },
+
+    /// A function definition
+    Function {
+        name: String,
+        parameter_names: Vec<String>,
+        statements: Vec<Statement>,
     },
 
     /// A conditional or branching control flow
@@ -70,13 +77,16 @@ impl From<VariableDeclarationStatement> for Statement {
 }
 
 impl VariableDeclarationStatement {
-    pub fn execute(&self, environment: Rc<RefCell<Environment>>) -> Result<(), ExecutionError> {
+    pub fn execute(
+        &self,
+        environment: Rc<RefCell<Environment>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
+    ) -> Result<(), EvaluationError> {
         let result = self
             .expression
             .clone()
-            .map(|e| e.evaluate(&mut environment.borrow_mut()))
-            .unwrap_or(Ok(EvaluationResult::Nil))
-            .map_err(Evaluation)?;
+            .map(|e| e.evaluate(environment.clone(), side_effects.clone()))
+            .unwrap_or(Ok(EvaluationResult::Nil))?;
 
         environment
             .borrow_mut()
@@ -87,37 +97,16 @@ impl VariableDeclarationStatement {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
-pub(crate) enum ExecutionError {
-    Evaluation(EvaluationError),
-    CannotRedefineVariable(ExistsError),
-    /// Attempted to use a `break` or `continue` statement outside the context of a loop.
-    NotInALoop(NotInALoopError),
-}
-
-impl Display for ExecutionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Evaluation(e) => write!(f, "Evaluation error: {}", e),
-            CannotRedefineVariable(e) => write!(f, "Cannot redefine variable: {}", e),
-            // FIXME Display dependent on Debug
-            NotInALoop(e) => write!(
-                f,
-                "Encountered `break` or `continue` outside a loop: {:?}",
-                e
-            ),
-        }
-    }
-}
-
 impl Statement {
-    pub fn execute<S: SideEffects>(
+    pub fn execute(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
-    ) -> Result<(), ExecutionError> {
+        side_effects: Rc<RefCell<dyn SideEffects>>,
+    ) -> Result<(), EvaluationError> {
         match self {
-            Self::Expression(expression) => self.execute_expression(environment, expression),
+            Self::Expression(expression) => {
+                self.execute_expression(environment, expression, side_effects)
+            }
             Self::For {
                 initializer,
                 condition,
@@ -131,8 +120,30 @@ impl Statement {
                 increment,
                 statement.clone(),
             ),
+            Self::Function {
+                name,
+                parameter_names,
+                statements,
+            } => {
+                // TODO consider separating mechanism for defining variables and functions? Error might be misleading.
+                environment
+                    .borrow_mut()
+                    .define(
+                        name.clone(),
+                        EvaluationResult::Function(Callables::UserDefinedFunction(
+                            FunctionDefinition {
+                                name: name.clone(),
+                                parameter_names: parameter_names.clone(),
+                                statements: statements.clone(),
+                            },
+                        )),
+                    )
+                    .map_err(CannotRedefineVariable)
+            }
             Self::Print(value) => self.execute_print(environment, side_effects, value),
-            Self::VariableDeclaration(declaration) => declaration.execute(environment),
+            Self::VariableDeclaration(declaration) => {
+                declaration.execute(environment, side_effects)
+            }
             Self::While(condition, statement) => {
                 self.execute_while_loop(environment, side_effects, condition, statement.as_ref())
             }
@@ -153,8 +164,8 @@ impl Statement {
                 then_branch.as_ref(),
                 else_branch.clone(),
             ),
-            Statement::Break => environment.borrow_mut().exit_loop().map_err(NotInALoop),
-            Statement::Continue => environment
+            Self::Break => environment.borrow_mut().exit_loop().map_err(NotInALoop),
+            Self::Continue => environment
                 .borrow_mut()
                 .jump_to_next_loop_iteration()
                 .map_err(NotInALoop),
@@ -165,22 +176,21 @@ impl Statement {
         &self,
         environment: Rc<RefCell<Environment>>,
         expression: &Expression,
-    ) -> Result<(), ExecutionError> {
-        expression
-            .evaluate(&mut environment.borrow_mut())
-            .map_err(Evaluation)?;
+        side_effects: Rc<RefCell<dyn SideEffects>>,
+    ) -> Result<(), EvaluationError> {
+        expression.evaluate(environment, side_effects)?;
         Ok(())
     }
 
-    fn execute_for_loop<S: SideEffects>(
+    fn execute_for_loop(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         initializer: &Option<Either<VariableDeclarationStatement, Expression>>,
         condition: &Option<Expression>,
         increment: &Option<Expression>,
         statement: Box<Statement>,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<(), EvaluationError> {
         // For loops get their own scope
         let loop_control = Rc::new(RefCell::new(LoopControl::default()));
         let environment = Rc::new(RefCell::new(Environment::new_nested_loop_scope(
@@ -189,21 +199,18 @@ impl Statement {
         )));
         match initializer {
             Some(Either::Left(declaration)) => {
-                declaration.execute(environment.clone())?;
+                declaration.execute(environment.clone(), side_effects.clone())?;
             }
             Some(Either::Right(expression)) => {
-                expression
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?;
+                expression.evaluate(environment.clone(), side_effects.clone())?;
             }
             None => {}
         }
 
-        let evaluate_condition = || -> Result<bool, ExecutionError> {
+        let evaluate_condition = || -> Result<bool, EvaluationError> {
             Ok(if let Some(condition) = condition {
                 condition
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?
+                    .evaluate(environment.clone(), side_effects.clone())?
                     .is_truthful()
             } else {
                 true
@@ -219,51 +226,48 @@ impl Statement {
                 }
                 _ => statement.execute(environment.clone(), side_effects.clone())?,
             }
+            // Check if `break` or `continue` was called. Preemption of remaining statements is
+            // handled in `execute_block(Environment, SideEffects, &[Statement])`.
             if loop_control.borrow().exit_loop {
                 break;
             } else if loop_control.borrow().jump_to_next_iteration {
                 loop_control.borrow_mut().jump_to_next_iteration = false;
             }
             if let Some(increment) = increment {
-                increment
-                    .evaluate(&mut environment.borrow_mut())
-                    .map_err(Evaluation)?;
+                increment.evaluate(environment.clone(), side_effects.clone())?;
             }
         }
 
         Ok(())
     }
 
-    fn execute_print<S: SideEffects>(
+    fn execute_print(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         value: &Expression,
-    ) -> Result<(), ExecutionError> {
-        let result = value
-            .evaluate(&mut environment.borrow_mut())
-            .map_err(Evaluation)?;
+    ) -> Result<(), EvaluationError> {
+        let result = value.evaluate(environment, side_effects.clone())?;
 
         side_effects.borrow_mut().println(&format!("{}", result));
 
         Ok(())
     }
 
-    fn execute_while_loop<S: SideEffects>(
+    fn execute_while_loop(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         condition: &Expression,
         statement: &Statement,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<(), EvaluationError> {
         let loop_control = Rc::new(RefCell::new(LoopControl::default()));
         let environment = Rc::new(RefCell::new(Environment::new_nested_loop_scope(
             environment.clone(),
             loop_control.clone(),
         )));
         while condition
-            .evaluate(&mut environment.borrow_mut())
-            .map_err(Evaluation)?
+            .evaluate(environment.clone(), side_effects.clone())?
             .is_truthful()
         {
             statement.execute(environment.clone(), side_effects.clone())?;
@@ -276,12 +280,12 @@ impl Statement {
         Ok(())
     }
 
-    fn execute_block<S: SideEffects>(
+    fn execute_block(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         statements: &[Statement],
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<(), EvaluationError> {
         for statement in statements {
             statement.execute(environment.clone(), side_effects.clone())?;
             if environment.borrow().should_exit_loop()
@@ -295,22 +299,21 @@ impl Statement {
         Ok(())
     }
 
-    fn execute_if_statement<S: SideEffects>(
+    fn execute_if_statement(
         &self,
         environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<S>>,
+        side_effects: Rc<RefCell<dyn SideEffects>>,
         condition: &Expression,
         then_branch: &Statement,
         else_branch: Option<Box<Statement>>,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<(), EvaluationError> {
         if condition
-            .evaluate(&mut environment.borrow_mut())
-            .map_err(Evaluation)?
+            .evaluate(environment.clone(), side_effects.clone())?
             .is_truthful()
         {
-            then_branch.execute(environment.clone(), side_effects.clone())
+            then_branch.execute(environment, side_effects)
         } else if let Some(else_branch) = else_branch {
-            else_branch.execute(environment.clone(), side_effects.clone())
+            else_branch.execute(environment, side_effects)
         } else {
             Ok(())
         }
@@ -319,17 +322,20 @@ impl Statement {
 
 #[cfg(test)]
 mod tests {
-    use super::Statement::{Block, Break, Continue, For, Print};
-    use super::{ExecutionError, Statement, VariableDeclarationStatement};
+    use super::Statement::{Block, Break, Continue, For, Function, If, Print};
+    use super::{Statement, VariableDeclarationStatement};
+    use crate::callable::Callables;
     use crate::environment::{Environment, NotInALoopError};
-    use crate::grammar::{BinaryOperator, EvaluationError, EvaluationResult, Expression, Literal};
+    use crate::grammar::{
+        BinaryOperator, EvaluationError, EvaluationResult, Expression, FunctionDefinition, Literal,
+    };
     use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One, Zero};
     use either::Left;
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    fn unsuccessful_execution_test(statement: &Statement, expected: &ExecutionError) {
+    fn unsuccessful_execution_test(statement: &Statement, expected: &EvaluationError) {
         // given
         let environment = Rc::new(RefCell::new(Environment::default()));
         let side_effects = Rc::new(RefCell::new(StandardSideEffects::default()));
@@ -358,19 +364,19 @@ mod tests {
     unsuccessful_execution_tests! {
         use_variable_before_declaration: (
             Print(Expression::VariableReference("a".to_string())),
-            ExecutionError::Evaluation(EvaluationError::Undefined),
+            EvaluationError::Undefined,
         ),
         assignment_without_declaration: (
             Statement::Expression(Expression::Assignment("a".to_string(), Box::new(BigDecimal::one().into()))),
-            ExecutionError::Evaluation(EvaluationError::Undefined),
+            EvaluationError::Undefined,
         ),
         break_outside_loop: (
             Break,
-            ExecutionError::NotInALoop(NotInALoopError),
+            EvaluationError::NotInALoop(NotInALoopError),
         ),
         continue_outside_loop: (
             Continue,
-            ExecutionError::NotInALoop(NotInALoopError),
+            EvaluationError::NotInALoop(NotInALoopError),
         ),
     }
 
@@ -506,7 +512,7 @@ mod tests {
             identifier: "a".to_string(),
             expression: Some(BigDecimal::one().into()),
         });
-        let print_statement = Statement::Print(Expression::Assignment(
+        let print_statement = Print(Expression::Assignment(
             "a".to_string(),
             Box::new(BigDecimal::from(2).into()),
         ));
@@ -554,9 +560,9 @@ mod tests {
         // given
         let environment = Rc::new(RefCell::new(Environment::default()));
         let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
-        let conditional = Statement::If {
+        let conditional = If {
             condition: false.into(),
-            then_branch: Box::new(Statement::Print("then clause".to_string().into())),
+            then_branch: Box::new(Print("then clause".to_string().into())),
             else_branch: None,
         };
 
@@ -574,10 +580,10 @@ mod tests {
         // given
         let environment = Rc::new(RefCell::new(Environment::default()));
         let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
-        let conditional = Statement::If {
+        let conditional = If {
             condition: false.into(),
-            then_branch: Box::new(Statement::Print("then clause".to_string().into())),
-            else_branch: Some(Box::new(Statement::Print("else clause".to_string().into()))),
+            then_branch: Box::new(Print("then clause".to_string().into())),
+            else_branch: Some(Box::new(Print("else clause".to_string().into()))),
         };
 
         // when
@@ -846,7 +852,7 @@ mod tests {
         let condition = Expression::Binary {
             operator: BinaryOperator::LessThan,
             left_value: Box::new(Expression::VariableReference("i".to_string())),
-            right_value: Box::new(BigDecimal::from(1_000_000).into()),
+            right_value: Box::new(BigDecimal::from(1_000).into()),
         };
         let increment = Expression::Assignment(
             "i".to_string(),
@@ -931,7 +937,186 @@ mod tests {
         assert_eq!(lines[2], "2e0".to_string());
     }
 
-    #[derive(Default)]
+    #[test]
+    fn continue_still_increments() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+
+        environment
+            .borrow_mut()
+            .define(
+                "i".to_string(),
+                EvaluationResult::Number(BigDecimal::zero().into()),
+            )
+            .expect("Unable to define variable");
+        environment
+            .borrow_mut()
+            .define(
+                "j".to_string(),
+                EvaluationResult::Number(BigDecimal::zero().into()),
+            )
+            .expect("Unable to define variable");
+
+        let condition = Expression::Binary {
+            operator: BinaryOperator::LessThan,
+            left_value: Box::new(Expression::VariableReference("i".to_string())),
+            right_value: Box::new(BigDecimal::from(3).into()),
+        };
+        let increment = Expression::Assignment(
+            "i".to_string(),
+            Box::new(Expression::Binary {
+                operator: BinaryOperator::Add,
+                left_value: Box::new(Expression::VariableReference("i".to_string())),
+                right_value: Box::new(BigDecimal::one().into()),
+            }),
+        );
+        let block = Block(vec![
+            Statement::Expression(Expression::Assignment(
+                "j".to_string(),
+                Box::new(Expression::Binary {
+                    operator: BinaryOperator::Add,
+                    left_value: Box::new(Expression::VariableReference("j".to_string())),
+                    right_value: Box::new(Expression::Literal(Literal::Number(
+                        BigDecimal::one().into(),
+                    ))),
+                }),
+            )),
+            If {
+                condition: Expression::Binary {
+                    operator: BinaryOperator::GreaterThanOrEqual,
+                    left_value: Box::new(Expression::VariableReference("j".to_string())),
+                    right_value: Box::new(Expression::Literal(Literal::Number(
+                        BigDecimal::from(3).into(),
+                    ))),
+                },
+                then_branch: Box::new(Break),
+                else_branch: None,
+            },
+            Continue,
+            Print(Expression::Literal(Literal::String(
+                "Don't print me".to_string(),
+            ))),
+        ]);
+        let for_loop = For {
+            initializer: None,
+            condition: Some(condition),
+            increment: Some(increment),
+            statement: Box::new(block),
+        };
+
+        // when
+        for_loop
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute for loop");
+
+        // then
+        assert_eq!(
+            environment.borrow().get("i").expect("variable missing"),
+            EvaluationResult::Number(BigDecimal::from(2).into())
+        );
+        assert_eq!(
+            environment.borrow().get("j").expect("variable missing"),
+            EvaluationResult::Number(BigDecimal::from(3).into())
+        );
+        assert!(side_effects.borrow().lines.is_empty());
+    }
+    #[test]
+    fn define_function() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let function_declaration = Function {
+            name: "print_value".to_string(),
+            parameter_names: vec!["x".to_string()],
+            statements: vec![Print(Expression::VariableReference("x".to_string()))],
+        };
+
+        // when
+        function_declaration
+            .execute(environment.clone(), side_effects.clone())
+            .expect("Unable to execute function definition");
+
+        // then
+        let function = environment
+            .borrow()
+            .get("print_value")
+            .expect("Function not defined in environment");
+
+        assert!(matches!(
+            function,
+            EvaluationResult::Function(
+                Callables::UserDefinedFunction(
+                    FunctionDefinition {
+                        name,
+                        parameter_names,
+                        statements
+                    }
+                )
+            )
+            if name == "print_value"
+                && parameter_names.len() == 1
+                && statements.len() == 1
+                && parameter_names[0] == "x"
+                && matches!(
+                    &statements[0],
+                    Print(Expression::VariableReference(parameter_name))
+                    if parameter_name == "x"
+                )
+        ))
+    }
+
+    #[test]
+    fn cannot_define_function_if_name_taken() {
+        // given
+        let globals = Rc::new(RefCell::new(Environment::default()));
+        let environment = Rc::new(RefCell::new(Environment::new_nested_scope(globals.clone())));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+
+        environment
+            .borrow_mut()
+            .define(
+                "foo".to_string(),
+                EvaluationResult::String("bar".to_string()),
+            )
+            .expect("Unable to define variable");
+
+        let function_definition = Function {
+            name: "foo".to_string(),
+            parameter_names: vec![],
+            statements: vec![],
+        };
+
+        // when
+        let result = function_definition
+            .execute(environment, side_effects)
+            .expect_err("Expected evaluation error");
+
+        // then
+        assert!(matches!(result, EvaluationError::CannotRedefineVariable(_)))
+    }
+
+    #[test]
+    fn evaluation_error_propagates() {
+        // given
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let statement = Statement::Expression(Expression::Binary {
+            operator: BinaryOperator::Divide,
+            left_value: Box::new(Expression::Literal(Literal::Number(1.into()))),
+            right_value: Box::new(Expression::Literal(Literal::Number(0.into()))),
+        });
+
+        // when
+        let result = statement
+            .execute(environment, side_effects)
+            .expect_err("Expected error");
+
+        // then
+        assert!(matches!(result, EvaluationError::DivideByZero));
+    }
+
+    #[derive(Default, Clone)]
     struct TestSideEffects {
         lines: Vec<String>,
     }

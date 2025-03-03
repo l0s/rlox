@@ -1,3 +1,4 @@
+mod callable;
 mod environment;
 mod grammar;
 mod interpreter;
@@ -202,7 +203,7 @@ mod tests {
         assert_eq!(side_effects.borrow().lines[1], "2e0");
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct TestSideEffects {
         lines: Vec<String>,
     }

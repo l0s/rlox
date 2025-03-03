@@ -1,3 +1,4 @@
+use crate::callable::Clock;
 use crate::environment::Environment;
 use crate::grammar::{EvaluationError, EvaluationResult, Expression};
 use crate::interpreter::InterpreterError::Execution;
@@ -5,14 +6,14 @@ use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
 use crate::scanner::Scanner;
 use crate::side_effects::{SideEffects, StandardSideEffects};
-use crate::statement::{ExecutionError, Statement};
+use crate::statement::Statement;
 use crate::token::Token;
 use std::cell::RefCell;
 use std::rc::Rc;
 use InterpreterError::{Lex, Parse};
 
 /// An interpreter takes source code and executes it
-pub(crate) struct Interpreter<S: SideEffects> {
+pub(crate) struct Interpreter<S: SideEffects + 'static> {
     environment: Rc<RefCell<Environment>>,
     side_effects: Rc<RefCell<S>>,
 }
@@ -31,13 +32,19 @@ pub(crate) enum InterpreterError {
     Parse(ParseError),
     // Evaluation(EvaluationError),
     /// A statement could not be executed
-    Execution(ExecutionError),
+    Execution(EvaluationError),
 }
 
 impl<S: SideEffects> Interpreter<S> {
     pub fn new(side_effects: Rc<RefCell<S>>) -> Self {
+        // globals
+        let mut globals = Environment::default();
+        globals
+            .define("clock".to_string(), Clock {}.into())
+            .expect("Unable to define `clock` native function");
+
         Self {
-            environment: Default::default(),
+            environment: Rc::new(RefCell::new(globals)),
             side_effects,
         }
     }
@@ -75,7 +82,7 @@ impl<S: SideEffects> Interpreter<S> {
         &mut self,
         expression: &Expression,
     ) -> Result<EvaluationResult, EvaluationError> {
-        expression.evaluate(&mut self.environment.borrow_mut())
+        expression.evaluate(self.environment.clone(), self.side_effects.clone())
     }
 }
 
@@ -233,7 +240,30 @@ for (var i = 0; i < 3; i = i - 1) { // infinite loop 😱
         assert_eq!(side_effects.lines[2], "2e0");
     }
 
-    #[derive(Default)]
+    #[test]
+    fn define_and_run_function() {
+        // given
+        let source = "
+fun add(a, b, c) {
+  print a + b + c;
+}
+add( 1, 2, 3 );
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 1);
+        assert_eq!(side_effects.lines[0], "6e0");
+    }
+
+    #[derive(Default, Clone)]
     struct TestSideEffects {
         lines: Vec<String>,
     }
