@@ -39,13 +39,20 @@ pub(crate) enum InterpreterError {
 impl Interpreter {
     pub fn new(side_effects: Rc<RefCell<dyn SideEffects>>) -> Self {
         // globals
-        let mut globals = Environment::default();
-        globals
-            .define("clock".to_string(), Clock {}.into())
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        environment
+            .borrow_mut()
+            .define(
+                "clock".to_string(),
+                Clock {
+                    closure: environment.clone(),
+                }
+                .into(),
+            )
             .expect("Unable to define `clock` native function");
 
         Self {
-            environment: Rc::new(RefCell::new(globals)),
+            environment,
             side_effects,
         }
     }
@@ -264,6 +271,85 @@ add( 1, 2, 3 );
         assert_eq!(side_effects.lines[0], "6e0");
     }
 
+    #[test]
+    fn recursive_fib() {
+        // given
+        let source = "
+fun fib(n) {
+  if (n <= 1) return n;
+  return fib(n - 2) + fib(n - 1);
+}
+
+for (var i = 0; i < 20; i = i + 1) {
+  print fib(i);
+}
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 20);
+        assert_eq!(side_effects.lines[0], "0e0");
+        assert_eq!(side_effects.lines[1], "1e0");
+        assert_eq!(side_effects.lines[2], "1e0");
+        assert_eq!(side_effects.lines[3], "2e0");
+        assert_eq!(side_effects.lines[4], "3e0");
+        assert_eq!(side_effects.lines[5], "5e0");
+        assert_eq!(side_effects.lines[6], "8e0");
+        assert_eq!(side_effects.lines[7], "13e0");
+        assert_eq!(side_effects.lines[8], "21e0");
+        assert_eq!(side_effects.lines[9], "34e0");
+        assert_eq!(side_effects.lines[10], "55e0");
+        assert_eq!(side_effects.lines[11], "89e0");
+        assert_eq!(side_effects.lines[12], "144e0");
+        assert_eq!(side_effects.lines[13], "233e0");
+        assert_eq!(side_effects.lines[14], "377e0");
+        assert_eq!(side_effects.lines[15], "610e0");
+        assert_eq!(side_effects.lines[16], "987e0");
+        assert_eq!(side_effects.lines[17], "1.597e3");
+        assert_eq!(side_effects.lines[18], "2.584e3");
+        assert_eq!(side_effects.lines[19], "4.181e3");
+    }
+
+    #[test]
+    fn closure_capture() {
+        // given
+        let source = "
+fun makeCounter() {
+  var i = 0;
+  fun count() {
+    i = i + 1;
+    print i;
+  }
+
+  return count;
+}
+
+var counter = makeCounter();
+counter(); // 1e0
+counter(); // 2e0
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 2);
+        assert_eq!(side_effects.lines[0], "1e0");
+        assert_eq!(side_effects.lines[1], "2e0");
+    }
+
     #[derive(Default, Clone)]
     struct TestSideEffects {
         lines: Vec<String>,
@@ -271,7 +357,8 @@ add( 1, 2, 3 );
 
     impl SideEffects for TestSideEffects {
         fn println(&mut self, text: &str) {
-            self.lines.push(text.to_string())
+            self.lines.push(text.to_string());
+            eprintln!("-- {}", text);
         }
 
         fn eprintln(&mut self, _text: &str) {

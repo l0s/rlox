@@ -1,8 +1,9 @@
 use crate::evaluation_result::EvaluationResult;
+use itertools::Itertools;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::rc::Rc;
 
 /// The scope for variables
@@ -16,9 +17,11 @@ pub(crate) struct Environment {
     /// If `None`, then this environment is the global scope, otherwise, a pointer to the root
     /// environment
     global: Option<Rc<RefCell<Self>>>,
+    /// True if and only if this scope is inside a function
+    pub(crate) function_scope: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Eq, PartialEq, Copy, Clone)]
 pub(crate) struct LoopControl {
     pub(crate) exit_loop: bool,
     pub(crate) jump_to_next_iteration: bool,
@@ -141,7 +144,8 @@ impl Environment {
             parent: Some(parent.clone()),
             values: Default::default(),
             loop_control,
-            global: Some(Environment::global_scope(parent)),
+            global: Some(Environment::global_scope(parent.clone())),
+            function_scope: parent.borrow().function_scope,
         }
     }
 
@@ -153,8 +157,41 @@ impl Environment {
             parent: Some(parent.clone()),
             values: Default::default(),
             loop_control: Some(loop_control.clone()),
-            global: Some(Environment::global_scope(parent)),
+            global: Some(Environment::global_scope(parent.clone())),
+            function_scope: parent.borrow().function_scope,
         }
+    }
+
+    pub fn new_nested_function_scope(closure: Rc<RefCell<Self>>) -> Self {
+        let loop_control = closure.borrow().loop_control.clone();
+        Self {
+            parent: Some(closure.clone()),
+            values: Default::default(),
+            loop_control,
+            global: Some(Environment::global_scope(closure)),
+            function_scope: true,
+        }
+    }
+}
+
+impl PartialEq<Self> for Environment {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent == other.parent
+            && self.loop_control == other.loop_control
+            && self.values == other.values
+    }
+}
+
+impl Eq for Environment {}
+
+impl Debug for Environment {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Environment {{ root: {}, variables: {} }}",
+            self.parent.is_none(),
+            self.values.keys().join(", ")
+        )
     }
 }
 

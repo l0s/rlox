@@ -166,7 +166,7 @@ impl Debug for Expression {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum EvaluationError {
     TypeMismatch,
     NilValue,
@@ -180,6 +180,10 @@ pub enum EvaluationError {
     CannotRedefineVariable(ExistsError),
     /// Attempted to use a `break` or `continue` statement outside the context of a loop.
     NotInALoop(NotInALoopError),
+    /// Not an actual error, this indicates that function returned
+    Return(Option<EvaluationResult>),
+    /// Attempted to use a `return` statement outside the context of a function.
+    NotInAFunction,
 }
 
 impl Display for EvaluationError {
@@ -202,6 +206,9 @@ impl Display for EvaluationError {
                 "Encountered `break` or `continue` outside a loop: {:?}",
                 e
             ),
+            // FIXME Display dependent on Debug
+            Self::Return(expression) => write!(f, "return {:?}", expression),
+            Self::NotInAFunction => write!(f, "Not in a function"),
         }
     }
 }
@@ -498,6 +505,7 @@ pub(crate) struct FunctionDefinition {
     pub(crate) name: String,
     pub(crate) parameter_names: Vec<String>,
     pub(crate) statements: Vec<Statement>,
+    pub(crate) closure: Rc<RefCell<Environment>>,
 }
 
 impl Callable for FunctionDefinition {
@@ -509,6 +517,10 @@ impl Callable for FunctionDefinition {
         self.parameter_names[index].clone()
     }
 
+    fn closure(&self) -> Rc<RefCell<Environment>> {
+        self.closure.clone()
+    }
+
     fn unchecked_call(
         &self,
         environment: Rc<RefCell<Environment>>,
@@ -518,7 +530,7 @@ impl Callable for FunctionDefinition {
             statement.execute(environment.clone(), side_effects.clone())?;
         }
 
-        // TODO need to extract return value if one exists
+        // If none of the previous statements was a return statement, return `Unit`.
         Ok(EvaluationResult::Unit)
     }
 }
@@ -986,6 +998,7 @@ mod tests {
                 }),
                 right_value: Box::new(Expression::VariableReference("c".to_string())),
             })],
+            closure: environment.clone(),
         };
         environment
             .borrow_mut()

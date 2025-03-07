@@ -264,6 +264,8 @@ impl Parser {
             self.if_statement()
         } else if self.token_match(&[TokenType::Print]) {
             self.print_statement()
+        } else if self.token_match(&[TokenType::Return]) {
+            self.return_statement()
         } else if self.token_match(&[TokenType::While]) {
             self.while_statement()
         } else if self.token_match(&[TokenType::OpenBrace]) {
@@ -279,6 +281,19 @@ impl Parser {
         } else {
             self.expression_statement()
         }
+    }
+
+    fn return_statement(&mut self) -> Result<Statement, ParseError> {
+        let value = if self.check(&TokenType::Semicolon) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+
+        // TODO optimization: only clone if necessary
+        self.consume(&TokenType::Semicolon, UnterminatedStatement(value.clone()))?;
+
+        Ok(Statement::Return(value))
     }
 
     fn for_statement(&mut self) -> Result<Statement, ParseError> {

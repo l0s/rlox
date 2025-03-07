@@ -50,6 +50,9 @@ pub(crate) enum Statement {
     /// Evaluates an expression and outputs the result
     Print(Expression),
 
+    /// Emit a value for a function. This may only be used inside a function definition (`Function`).
+    Return(Option<Expression>),
+
     /// Execute a statement until some condition is no longer met
     While(Expression, Box<Statement>),
     /// Exit a loop, skipping any remaining statements in an iteration and all subsequent iterations
@@ -145,6 +148,7 @@ impl Statement {
                                 name: name.clone(),
                                 parameter_names: parameter_names.clone(),
                                 statements: statements.clone(),
+                                closure: environment.clone(),
                             },
                         )),
                     )
@@ -153,6 +157,18 @@ impl Statement {
             Self::Print(value) => self.execute_print(environment, side_effects, value),
             Self::VariableDeclaration(declaration) => {
                 declaration.execute(environment, side_effects)
+            }
+            Self::Return(expression) => {
+                if !environment.borrow().function_scope {
+                    return Err(EvaluationError::NotInAFunction);
+                }
+                Err(EvaluationError::Return(match expression {
+                    None => None,
+                    Some(value) => {
+                        let result = value.evaluate(environment, side_effects)?;
+                        Some(result)
+                    }
+                }))
             }
             Self::While(condition, statement) => {
                 self.execute_while_loop(environment, side_effects, condition, statement.as_ref())
@@ -330,7 +346,7 @@ impl Statement {
 
 #[cfg(test)]
 mod tests {
-    use super::Statement::{Block, Break, Continue, For, Function, If, Print};
+    use super::Statement::{Block, Break, Continue, For, Function, If, Print, Return};
     use super::{Statement, VariableDeclarationStatement};
     use crate::callable::Callables;
     use crate::environment::{Environment, NotInALoopError};
@@ -387,6 +403,10 @@ mod tests {
             Continue,
             EvaluationError::NotInALoop(NotInALoopError),
         ),
+        return_outside_function: (
+            Return(None),
+            EvaluationError::NotInAFunction,
+        ),
     }
 
     #[test]
@@ -398,8 +418,7 @@ mod tests {
             identifier: "beverage".to_string(),
             expression: Some("espresso".to_string().into()),
         });
-        let print_statement =
-            Statement::Print(Expression::VariableReference("beverage".to_string()));
+        let print_statement = Print(Expression::VariableReference("beverage".to_string()));
 
         // when
         variable_definition
@@ -1059,7 +1078,8 @@ mod tests {
                     FunctionDefinition {
                         name,
                         parameter_names,
-                        statements
+                        statements,
+                        closure: _,
                     }
                 )
             )

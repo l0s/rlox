@@ -20,13 +20,16 @@ pub(crate) trait Callable: Display + CallableClone {
     /// - `index` - The 0-indexed parameter, must be less than `arity()`
     fn parameter_name(&self, index: usize) -> String;
 
+    fn closure(&self) -> Rc<RefCell<Environment>>;
+
     /// Invoke this callable with expressions as arguments
     ///
     /// Parameters:
-    /// - `environment` - The current execution environment. The invocation will spawn a temporary
-    ///     nested environment.
+    /// - `environment` - The current execution environment for evaluating the arguments. The
+    ///     invocation will spawn a new environment that captures the variables at the time it was
+    ///     defined.
     /// - `side_effects` - Functions may produce side effects
-    /// - `arguments` - The arguments as expressions. They will be evaluated and placed in the
+    /// - `arguments` - The arguments as expressions. They will be evaluated and placed in a
     ///     temporary environment before the function body is invoked.
     ///
     /// Returns:
@@ -48,14 +51,12 @@ pub(crate) trait Callable: Display + CallableClone {
             .iter()
             .map(|argument| argument.evaluate(environment.clone(), side_effects.clone()))
             .collect::<Result<Vec<EvaluationResult>, EvaluationError>>()?;
-        self.call_with_arguments(environment, side_effects, &arguments)
+        self.call_with_arguments(side_effects, &arguments)
     }
 
     /// Invoke this callable with evaluated arguments
     ///
     /// Parameters:
-    /// - `environment` - The current execution environment. The invocation will spawn a temporary
-    ///     nested environment.
     /// - `side_effects` - Functions may produce side effects
     /// - `arguments` - The evaluated arguments. They will be evaluated and placed in the
     ///     temporary environment before the function body is invoked.
@@ -66,7 +67,6 @@ pub(crate) trait Callable: Display + CallableClone {
     ///     not be evaluated
     fn call_with_arguments(
         &self,
-        environment: Rc<RefCell<Environment>>,
         side_effects: Rc<RefCell<dyn SideEffects>>,
         arguments: &[EvaluationResult],
     ) -> Result<EvaluationResult, EvaluationError> {
@@ -75,7 +75,7 @@ pub(crate) trait Callable: Display + CallableClone {
             // i.e. should we allow passing in fewer arguments to produce a new function?
             return Err(IncorrectNumberOfArguments(arguments.len(), self.arity()));
         }
-        let mut environment = Environment::new_nested_scope(Environment::global_scope(environment));
+        let mut environment = Environment::new_nested_function_scope(self.closure());
         for (i, argument) in arguments.iter().enumerate() {
             // TODO when parsing function definition, ensure there are no duplicate parameter names
             let parameter_name = self.parameter_name(i);
@@ -83,14 +83,22 @@ pub(crate) trait Callable: Display + CallableClone {
                 .define(parameter_name, argument.clone())
                 .map_err(CannotRedefineVariable)?;
         }
-        self.unchecked_call(Rc::new(RefCell::new(environment)), side_effects)
+        match self.unchecked_call(Rc::new(RefCell::new(environment)), side_effects) {
+            Ok(result) => Ok(result),
+            Err(EvaluationError::Return(expression)) => match expression {
+                None => Ok(EvaluationResult::Unit),
+                Some(result) => Ok(result),
+            },
+            Err(e) => Err(e),
+        }
     }
 
     /// Invoke the function without performing any argument validation (including arity check).
     ///
     /// Parameters:
     /// - `environment` - A new environment specific to this function. It includes all the
-    ///     (evaluated) arguments to the function.
+    ///     (evaluated) arguments to the function and the captured variables from the time the
+    ///     function was defined.
     /// - `side_effects` - Functions may produce side effects
     ///
     /// Returns:
@@ -170,6 +178,13 @@ impl Callable for Callables {
         }
     }
 
+    fn closure(&self) -> Rc<RefCell<Environment>> {
+        match self {
+            Callables::UserDefinedFunction(definition) => definition.closure.clone(),
+            Callables::NativeFunction(_name, callable) => callable.closure().clone(),
+        }
+    }
+
     fn unchecked_call(
         &self,
         environment: Rc<RefCell<Environment>>,
@@ -186,8 +201,10 @@ impl Callable for Callables {
     }
 }
 
-#[derive(Default, Copy, Clone)]
-pub(crate) struct Clock;
+#[derive(Default, Clone)]
+pub(crate) struct Clock {
+    pub(crate) closure: Rc<RefCell<Environment>>,
+}
 
 impl Display for Clock {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -211,6 +228,10 @@ impl Callable for Clock {
 
     fn parameter_name<'s>(&self, _index: usize) -> String {
         unreachable!()
+    }
+
+    fn closure(&self) -> Rc<RefCell<Environment>> {
+        self.closure.clone()
     }
 
     fn unchecked_call(
@@ -251,6 +272,7 @@ mod tests {
             name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             statements: vec![],
+            closure: environment.clone(),
         };
         let arguments = vec![
             Expression::Literal("a".to_string().into()),
@@ -280,6 +302,7 @@ mod tests {
             name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             statements: vec![],
+            closure: environment.clone(),
         };
         let arguments = vec![
             Expression::Literal("a".to_string().into()),
@@ -306,6 +329,7 @@ mod tests {
             name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "x".to_string()],
             statements: vec![],
+            closure: environment.clone(),
         };
         let arguments = vec![
             Expression::Literal("a".to_string().into()),
@@ -328,11 +352,13 @@ mod tests {
             name: "foo".to_string(),
             parameter_names: vec![],
             statements: vec![],
+            closure: Rc::new(RefCell::new(Environment::default())),
         });
         let y = UserDefinedFunction(FunctionDefinition {
             name: "foo".to_string(),
             parameter_names: vec![],
             statements: vec![],
+            closure: Rc::new(RefCell::new(Environment::default())),
         });
 
         // when

@@ -77,11 +77,13 @@ impl From<FunctionDefinition> for EvaluationResult {
 
 #[cfg(test)]
 mod tests {
-
     use super::EvaluationResult;
     use crate::callable::Callables;
+    use crate::environment::Environment;
     use crate::grammar::FunctionDefinition;
     use bigdecimal::{BigDecimal, One, Zero};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn truthful_results() {
@@ -94,6 +96,7 @@ mod tests {
                 name: "program_halts".to_string(),
                 parameter_names: vec!["source_code".to_string()],
                 statements: vec![],
+                closure: Rc::new(RefCell::new(Environment::default())),
             })),
         ];
         for result in results {
