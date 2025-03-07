@@ -1,7 +1,8 @@
 use crate::callable::Callables;
 use crate::environment::{Environment, LoopControl};
+use crate::evaluation_result::EvaluationResult;
 use crate::grammar::EvaluationError::{CannotRedefineVariable, NotInALoop};
-use crate::grammar::{EvaluationError, EvaluationResult, Expression, FunctionDefinition};
+use crate::grammar::{EvaluationError, Expression, FunctionDefinition};
 use crate::side_effects::SideEffects;
 use either::Either;
 use std::cell::RefCell;
@@ -12,7 +13,7 @@ use std::rc::Rc;
 //     statements: Vec<Statement>,
 // }
 
-/// A statement is an instruction that produces a side effect
+/// A statement is an instruction that produces a side effect and does not evaluate to a value.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum Statement {
     /// Evaluates expressions that have side effects
@@ -98,6 +99,15 @@ impl VariableDeclarationStatement {
 }
 
 impl Statement {
+    /// Run the statement
+    ///
+    /// Parameters:
+    /// - `environment` - the variable scope in which to execute the statement
+    /// - `side_effects` - a handle to the outside world
+    ///
+    /// Returns:
+    /// - `()` - if the statement was executed successfully
+    /// - `EvaluationError` - if a non-recoverable error occurred
     pub fn execute(
         &self,
         environment: Rc<RefCell<Environment>>,
@@ -148,9 +158,7 @@ impl Statement {
                 self.execute_while_loop(environment, side_effects, condition, statement.as_ref())
             }
             Self::Block(statements) => {
-                let child = Rc::new(RefCell::new(Environment::new_nested_scope(
-                    environment.clone(),
-                )));
+                let child = Rc::new(RefCell::new(Environment::new_nested_scope(environment)));
                 self.execute_block(child, side_effects, statements)
             }
             Self::If {
@@ -194,7 +202,7 @@ impl Statement {
         // For loops get their own scope
         let loop_control = Rc::new(RefCell::new(LoopControl::default()));
         let environment = Rc::new(RefCell::new(Environment::new_nested_loop_scope(
-            environment.clone(),
+            environment,
             loop_control.clone(),
         )));
         match initializer {
@@ -326,8 +334,9 @@ mod tests {
     use super::{Statement, VariableDeclarationStatement};
     use crate::callable::Callables;
     use crate::environment::{Environment, NotInALoopError};
+    use crate::evaluation_result::EvaluationResult;
     use crate::grammar::{
-        BinaryOperator, EvaluationError, EvaluationResult, Expression, FunctionDefinition, Literal,
+        BinaryOperator, EvaluationError, Expression, FunctionDefinition, Literal,
     };
     use crate::side_effects::{SideEffects, StandardSideEffects};
     use bigdecimal::{BigDecimal, One, Zero};

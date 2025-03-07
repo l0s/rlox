@@ -173,7 +173,7 @@ pub(crate) enum FunctionKind {
 impl Display for FunctionKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Function => write!(f, "function"),
+            Function => write!(f, "function"),
             // Self::Method => write!(f, "method"),
         }
     }

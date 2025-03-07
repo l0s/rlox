@@ -1,5 +1,6 @@
 mod callable;
 mod environment;
+mod evaluation_result;
 mod grammar;
 mod interpreter;
 mod lexical_error;
@@ -45,16 +46,16 @@ fn main() {
     }
 }
 
-fn run_file(interpreter: &mut Interpreter<StandardSideEffects>, path: &str) -> (usize, usize) {
+fn run_file(interpreter: &mut Interpreter, path: &str) -> (usize, usize) {
     let source =
         fs::read_to_string(path).unwrap_or_else(|_| panic!("Unable to read file at: {}", path));
     let result = interpreter.run(&source);
     report(result)
 }
 
-fn prompt<S: SideEffects>(
-    interpreter: &mut Interpreter<S>,
-    side_effects: Rc<RefCell<S>>,
+fn prompt(
+    interpreter: &mut Interpreter,
+    side_effects: Rc<RefCell<dyn SideEffects>>,
 ) -> (usize, usize) {
     let mut lex_parse_errors = 0;
     let mut execution_errors = 0;
@@ -88,9 +89,9 @@ fn prompt<S: SideEffects>(
 /// Returns:
 /// - the number of lexical or parsing errors
 /// - the number or execution errors
-fn interpret_line<S: SideEffects>(
-    interpreter: &mut Interpreter<S>,
-    side_effects: Rc<RefCell<S>>,
+fn interpret_line(
+    interpreter: &mut Interpreter,
+    side_effects: Rc<RefCell<dyn SideEffects>>,
     buffer: &str,
 ) -> (usize, usize) {
     match interpreter.run(buffer) {

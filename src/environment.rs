@@ -1,4 +1,4 @@
-use crate::grammar::EvaluationResult;
+use crate::evaluation_result::EvaluationResult;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -161,7 +161,7 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::{Environment, ExistsError};
-    use crate::grammar::EvaluationResult;
+    use crate::evaluation_result::EvaluationResult;
     use bigdecimal::{BigDecimal, One};
     use std::cell::RefCell;
     use std::rc::Rc;

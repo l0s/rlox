@@ -1,6 +1,7 @@
 use crate::callable::Clock;
 use crate::environment::Environment;
-use crate::grammar::{EvaluationError, EvaluationResult, Expression};
+use crate::evaluation_result::EvaluationResult;
+use crate::grammar::{EvaluationError, Expression};
 use crate::interpreter::InterpreterError::Execution;
 use crate::lexical_error::LexicalError;
 use crate::parser::{ParseError, Parser};
@@ -13,14 +14,14 @@ use std::rc::Rc;
 use InterpreterError::{Lex, Parse};
 
 /// An interpreter takes source code and executes it
-pub(crate) struct Interpreter<S: SideEffects + 'static> {
+pub(crate) struct Interpreter {
     environment: Rc<RefCell<Environment>>,
-    side_effects: Rc<RefCell<S>>,
+    side_effects: Rc<RefCell<dyn SideEffects>>,
 }
 
-impl Default for Interpreter<StandardSideEffects> {
+impl Default for Interpreter {
     fn default() -> Self {
-        Self::new(Rc::new(RefCell::new(Default::default())))
+        Self::new(Rc::new(RefCell::new(StandardSideEffects)))
     }
 }
 
@@ -35,8 +36,8 @@ pub(crate) enum InterpreterError {
     Execution(EvaluationError),
 }
 
-impl<S: SideEffects> Interpreter<S> {
-    pub fn new(side_effects: Rc<RefCell<S>>) -> Self {
+impl Interpreter {
+    pub fn new(side_effects: Rc<RefCell<dyn SideEffects>>) -> Self {
         // globals
         let mut globals = Environment::default();
         globals

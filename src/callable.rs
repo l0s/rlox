@@ -1,6 +1,7 @@
 use crate::environment::Environment;
+use crate::evaluation_result::EvaluationResult;
 use crate::grammar::EvaluationError::{CannotRedefineVariable, IncorrectNumberOfArguments};
-use crate::grammar::{EvaluationError, EvaluationResult, Expression, FunctionDefinition};
+use crate::grammar::{EvaluationError, Expression, FunctionDefinition};
 use crate::side_effects::SideEffects;
 use bigdecimal::BigDecimal;
 use std::cell::RefCell;
@@ -13,8 +14,10 @@ pub(crate) trait Callable: Display + CallableClone {
     /// The number of function parameters.
     fn arity(&self) -> usize;
 
-    /// The parameters to the function in the order they are expected. The length **must** match
-    /// `arity()`.
+    /// Retrieve a parameter name by index.
+    ///
+    /// Parameters:
+    /// - `index` - The 0-indexed parameter, must be less than `arity()`
     fn parameter_name(&self, index: usize) -> String;
 
     /// Invoke this callable with expressions as arguments
@@ -231,7 +234,8 @@ mod tests {
     use super::Callables::{NativeFunction, UserDefinedFunction};
     use super::{Callable, Clock};
     use crate::environment::Environment;
-    use crate::grammar::{EvaluationError, EvaluationResult, Expression, FunctionDefinition};
+    use crate::evaluation_result::EvaluationResult;
+    use crate::grammar::{EvaluationError, Expression, FunctionDefinition};
     use crate::side_effects::StandardSideEffects;
     use bigdecimal::Signed;
     use std::cell::RefCell;

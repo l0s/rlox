@@ -1,5 +1,6 @@
-use crate::callable::{Callable, Callables};
+use crate::callable::Callable;
 use crate::environment::{Environment, ExistsError, NotInALoopError};
+use crate::evaluation_result::EvaluationResult;
 use crate::grammar::EvaluationError::{
     CannotRedefineVariable, IncorrectNumberOfArguments, NotAFunction, NotInALoop,
 };
@@ -43,6 +44,16 @@ pub(crate) enum Expression {
 }
 
 impl Expression {
+    /// Resolve the expression to a value
+    ///
+    /// Parameters:
+    /// - `environment` - the current scope for referencing and modifying variables
+    /// - `side_effects` - target for external side effects
+    ///
+    /// Returns:
+    /// - `Ok(EvaluationResult)` - if the expression could be resolved successfully. The result type
+    ///     will vary depending on the expression type and the input types
+    /// - `EvaluationError` - if the expression could not be resolved
     pub fn evaluate(
         &self,
         environment: Rc<RefCell<Environment>>,
@@ -267,9 +278,8 @@ impl BinaryOperator {
                         EvaluationResult::Number(value) => value.to_engineering_notation(),
                         EvaluationResult::String(value) => value.to_string(),
                         EvaluationResult::Boolean(value) => value.to_string(),
-                        EvaluationResult::Nil => "".to_string(),
+                        EvaluationResult::Nil | EvaluationResult::Unit => "".to_string(),
                         EvaluationResult::Function(definition) => definition.to_string(),
-                        EvaluationResult::Unit => "()".to_string(),
                     }
                 }
                 match (left, right) {
@@ -346,15 +356,16 @@ impl BinaryOperator {
         right_value: &Expression,
         operation: fn(BigDecimal, BigDecimal) -> BigDecimal,
     ) -> Result<EvaluationResult, EvaluationError> {
-        let left = left_value.evaluate(environment.clone(), side_effects.clone())?;
-        let right = right_value.evaluate(environment, side_effects)?;
-        match (left, right) {
-            // TODO will this fail early (short circuit) if one of these is NaN?
-            (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
-                Ok(EvaluationResult::Number(operation(x, y)))
+        match left_value.evaluate(environment.clone(), side_effects.clone())? {
+            EvaluationResult::Number(x) => {
+                match right_value.evaluate(environment, side_effects)? {
+                    EvaluationResult::Number(y) => Ok(EvaluationResult::Number(operation(x, y))),
+                    EvaluationResult::Nil => Err(NilValue),
+                    _ => Err(TypeMismatch),
+                }
             }
-            (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
-            (_, _) => Err(TypeMismatch),
+            EvaluationResult::Nil => Err(NilValue),
+            _ => Err(TypeMismatch),
         }
     }
 
@@ -365,16 +376,18 @@ impl BinaryOperator {
         right_value: &Expression,
         expected: &[Ordering],
     ) -> Result<EvaluationResult, EvaluationError> {
-        match (
-            left_value.evaluate(environment.clone(), side_effects.clone())?,
-            right_value.evaluate(environment, side_effects)?,
-        ) {
-            // TODO will this fail early (short circuit) if one of these is NaN?
-            (EvaluationResult::Number(x), EvaluationResult::Number(y)) => {
-                Ok(EvaluationResult::Boolean(expected.contains(&x.cmp(&y))))
+        match left_value.evaluate(environment.clone(), side_effects.clone())? {
+            EvaluationResult::Number(x) => {
+                match right_value.evaluate(environment, side_effects)? {
+                    EvaluationResult::Number(y) => {
+                        Ok(EvaluationResult::Boolean(expected.contains(&x.cmp(&y))))
+                    }
+                    EvaluationResult::Nil => Err(NilValue),
+                    _ => Err(TypeMismatch),
+                }
             }
-            (EvaluationResult::Nil, _) | (_, EvaluationResult::Nil) => Err(NilValue),
-            (_, _) => Err(TypeMismatch),
+            EvaluationResult::Nil => Err(NilValue),
+            _ => Err(TypeMismatch),
         }
     }
 }
@@ -393,7 +406,7 @@ impl UnaryOperator {
         input: &Expression,
     ) -> Result<EvaluationResult, EvaluationError> {
         match self {
-            UnaryOperator::Negative => {
+            Self::Negative => {
                 let operand = input.evaluate(environment, side_effects)?;
                 if let EvaluationResult::Number(operand) = operand {
                     Ok(EvaluationResult::Number(operand.neg()))
@@ -401,7 +414,7 @@ impl UnaryOperator {
                     Err(TypeMismatch)
                 }
             }
-            UnaryOperator::Not => {
+            Self::Not => {
                 let operand = input.evaluate(environment, side_effects)?;
                 Ok(EvaluationResult::Boolean(!operand.is_truthful()))
             }
@@ -416,18 +429,6 @@ pub(crate) enum Literal {
     True,
     False,
     Nil,
-}
-
-impl From<Literal> for EvaluationResult {
-    fn from(value: Literal) -> Self {
-        match value {
-            Literal::Number(value) => EvaluationResult::Number(value),
-            Literal::String(value) => EvaluationResult::String(value),
-            Literal::True => EvaluationResult::Boolean(true),
-            Literal::False => EvaluationResult::Boolean(false),
-            Literal::Nil => EvaluationResult::Nil,
-        }
-    }
 }
 
 impl FromStr for Literal {
@@ -493,27 +494,10 @@ impl From<Literal> for Expression {
 }
 
 #[derive(Eq, PartialEq, Debug, Clone)]
-pub(crate) enum EvaluationResult {
-    Number(BigDecimal),
-    String(String),
-    Boolean(bool),
-    Nil,
-    Function(Callables),
-    /// The type returned by a function that does not return a value
-    Unit,
-}
-
-#[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) struct FunctionDefinition {
     pub(crate) name: String,
     pub(crate) parameter_names: Vec<String>,
     pub(crate) statements: Vec<Statement>,
-}
-
-impl From<FunctionDefinition> for EvaluationResult {
-    fn from(value: FunctionDefinition) -> Self {
-        EvaluationResult::Function(Callables::UserDefinedFunction(value))
-    }
 }
 
 impl Callable for FunctionDefinition {
@@ -521,7 +505,7 @@ impl Callable for FunctionDefinition {
         self.parameter_names.len()
     }
 
-    fn parameter_name<'s>(&self, index: usize) -> String {
+    fn parameter_name(&self, index: usize) -> String {
         self.parameter_names[index].clone()
     }
 
@@ -549,44 +533,6 @@ impl Display for FunctionDefinition {
     }
 }
 
-impl Display for EvaluationResult {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Number(value) => value.write_engineering_notation(f),
-            Self::String(value) => f.write_str(value),
-            Self::Boolean(value) => write!(f, "{}", value),
-            Self::Nil => f.write_str("nil"),
-            Self::Function(definition) => write!(f, "{}", definition),
-            Self::Unit => write!(f, "()"),
-        }
-    }
-}
-
-impl EvaluationResult {
-    pub fn is_truthful(&self) -> bool {
-        match self {
-            Self::Number(_) => true,
-            Self::String(_) => true,
-            Self::Boolean(value) => *value,
-            Self::Nil => false,
-            Self::Function { .. } => true,
-            Self::Unit => false,
-        }
-    }
-
-    pub fn invoke(
-        &self,
-        environment: Rc<RefCell<Environment>>,
-        side_effects: Rc<RefCell<dyn SideEffects>>,
-        arguments: &[Expression],
-    ) -> Result<EvaluationResult, EvaluationError> {
-        match self {
-            Self::Function(definition) => definition.call(environment, side_effects, arguments),
-            _ => Err(NotAFunction),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::BinaryOperator::{
@@ -595,12 +541,10 @@ mod tests {
     };
     use super::EvaluationError::{DivideByZero, NilValue, NotAFunction, TypeMismatch};
     use super::Literal::Nil;
-    use super::{
-        BinaryOperator, EvaluationError, EvaluationResult, Expression, FunctionDefinition,
-        UnaryOperator,
-    };
+    use super::{BinaryOperator, EvaluationError, Expression, FunctionDefinition, UnaryOperator};
     use crate::callable::Callables;
     use crate::environment::Environment;
+    use crate::evaluation_result::EvaluationResult;
     use crate::side_effects::SideEffects;
     use crate::statement::Statement;
     use bigdecimal::{BigDecimal, FromPrimitive, One, Zero};
@@ -1066,35 +1010,6 @@ mod tests {
         assert_eq!(side_effects.borrow().lines[0], "6e0");
     }
 
-    #[test]
-    fn truthful_results() {
-        let results = [
-            EvaluationResult::Number(BigDecimal::zero()),
-            EvaluationResult::Number(BigDecimal::one()),
-            EvaluationResult::String("".to_string()),
-            EvaluationResult::Boolean(true),
-            EvaluationResult::Function(Callables::UserDefinedFunction(FunctionDefinition {
-                name: "program_halts".to_string(),
-                parameter_names: vec!["source_code".to_string()],
-                statements: vec![],
-            })),
-        ];
-        for result in results {
-            assert!(result.is_truthful());
-        }
-    }
-
-    #[test]
-    fn untruthful_results() {
-        let results = [
-            EvaluationResult::Boolean(false),
-            EvaluationResult::Unit,
-            EvaluationResult::Nil,
-        ];
-        for result in results {
-            assert!(!result.is_truthful());
-        }
-    }
     #[derive(Clone, Default)]
     struct TestSideEffects {
         lines: Vec<String>,
