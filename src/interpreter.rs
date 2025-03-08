@@ -361,8 +361,8 @@ counter(); // 2e0
             eprintln!("-- {}", text);
         }
 
-        fn eprintln(&mut self, _text: &str) {
-            unimplemented!()
+        fn eprintln(&mut self, text: &str) {
+            eprintln!("ERROR: {}", text)
         }
     }
 }

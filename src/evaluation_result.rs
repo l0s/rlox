@@ -93,7 +93,6 @@ mod tests {
             EvaluationResult::String("".to_string()),
             EvaluationResult::Boolean(true),
             EvaluationResult::Function(Callables::UserDefinedFunction(FunctionDefinition {
-                name: "program_halts".to_string(),
                 parameter_names: vec!["source_code".to_string()],
                 statements: vec![],
                 closure: Rc::new(RefCell::new(Environment::default())),

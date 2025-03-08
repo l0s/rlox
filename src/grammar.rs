@@ -1,4 +1,4 @@
-use crate::callable::Callable;
+use crate::callable::{Callable, Callables};
 use crate::environment::{Environment, ExistsError, NotInALoopError};
 use crate::evaluation_result::EvaluationResult;
 use crate::grammar::EvaluationError::{
@@ -26,6 +26,11 @@ pub(crate) enum Expression {
         right_value: Box<Expression>,
     },
     Unary(UnaryOperator, Box<Expression>),
+    /// An un-named function or a lambda expression
+    AnonymousFunction {
+        parameter_names: Vec<String>,
+        statements: Vec<Statement>,
+    },
     /// A function invocation
     Call {
         /// The function being executed
@@ -67,6 +72,18 @@ impl Expression {
                 right_value,
             } => operator.evaluate(environment, side_effects, left_value, right_value),
             Self::Unary(operator, operand) => operator.evaluate(environment, side_effects, operand),
+            Self::AnonymousFunction {
+                parameter_names,
+                statements,
+            } => Ok(EvaluationResult::Function(Callables::UserDefinedFunction(
+                FunctionDefinition {
+                    parameter_names: parameter_names.clone(),
+                    statements: statements.clone(),
+                    closure: Rc::new(RefCell::new(Environment::new_nested_function_scope(
+                        environment,
+                    ))),
+                },
+            ))),
             Self::Call { callee, arguments } => {
                 let callee = callee.evaluate(environment.clone(), side_effects.clone())?;
                 callee.invoke(environment, side_effects, arguments)
@@ -125,6 +142,17 @@ impl Debug for Expression {
                 UnaryOperator::Negative => write!(f, "(- {:?})", expression),
                 UnaryOperator::Not => write!(f, "(! {:?})", expression),
             },
+            Self::AnonymousFunction {
+                parameter_names,
+                statements: _,
+            } => {
+                if parameter_names.is_empty() {
+                    write!(f, "( anonymous function )")
+                } else {
+                    let parameter_names = parameter_names.iter().join(", ");
+                    write!(f, "( anonymous function: {} )", parameter_names)
+                }
+            }
             Self::Call { callee, arguments } => {
                 if arguments.is_empty() {
                     write!(f, "( {:?} )", callee)
@@ -502,7 +530,6 @@ impl From<Literal> for Expression {
 
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) struct FunctionDefinition {
-    pub(crate) name: String,
     pub(crate) parameter_names: Vec<String>,
     pub(crate) statements: Vec<Statement>,
     pub(crate) closure: Rc<RefCell<Environment>>,
@@ -538,9 +565,9 @@ impl Callable for FunctionDefinition {
 impl Display for FunctionDefinition {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.parameter_names.is_empty() {
-            write!(f, "( {} )", self.name)
+            write!(f, "( fun )")
         } else {
-            write!(f, "( {}: {} )", self.name, self.parameter_names.join(", "))
+            write!(f, "( fun: {} )", self.parameter_names.join(", "))
         }
     }
 }
@@ -987,7 +1014,6 @@ mod tests {
         let environment = Rc::new(RefCell::new(Environment::default()));
         let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
         let definition = FunctionDefinition {
-            name: "add".to_string(),
             parameter_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             statements: vec![Statement::Print(Expression::Binary {
                 operator: BinaryOperator::Add,

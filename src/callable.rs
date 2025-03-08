@@ -269,7 +269,6 @@ mod tests {
         let side_effects = Rc::new(RefCell::new(StandardSideEffects::default()));
 
         let function = FunctionDefinition {
-            name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             statements: vec![],
             closure: environment.clone(),
@@ -299,7 +298,6 @@ mod tests {
         let side_effects = Rc::new(RefCell::new(StandardSideEffects::default()));
 
         let function = FunctionDefinition {
-            name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             statements: vec![],
             closure: environment.clone(),
@@ -326,7 +324,6 @@ mod tests {
         let environment = Rc::new(RefCell::new(Environment::default()));
         let side_effects = Rc::new(RefCell::new(StandardSideEffects::default()));
         let function = FunctionDefinition {
-            name: "f".to_string(),
             parameter_names: vec!["x".to_string(), "x".to_string()],
             statements: vec![],
             closure: environment.clone(),
@@ -349,13 +346,11 @@ mod tests {
     fn equivalent_functions_are_equal() {
         // given
         let x = UserDefinedFunction(FunctionDefinition {
-            name: "foo".to_string(),
             parameter_names: vec![],
             statements: vec![],
             closure: Rc::new(RefCell::new(Environment::default())),
         });
         let y = UserDefinedFunction(FunctionDefinition {
-            name: "foo".to_string(),
             parameter_names: vec![],
             statements: vec![],
             closure: Rc::new(RefCell::new(Environment::default())),

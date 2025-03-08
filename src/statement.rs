@@ -1,8 +1,7 @@
-use crate::callable::Callables;
 use crate::environment::{Environment, LoopControl};
 use crate::evaluation_result::EvaluationResult;
 use crate::grammar::EvaluationError::{CannotRedefineVariable, NotInALoop};
-use crate::grammar::{EvaluationError, Expression, FunctionDefinition};
+use crate::grammar::{EvaluationError, Expression};
 use crate::side_effects::SideEffects;
 use either::Either;
 use std::cell::RefCell;
@@ -138,21 +137,14 @@ impl Statement {
                 parameter_names,
                 statements,
             } => {
-                // TODO consider separating mechanism for defining variables and functions? Error might be misleading.
-                environment
-                    .borrow_mut()
-                    .define(
-                        name.clone(),
-                        EvaluationResult::Function(Callables::UserDefinedFunction(
-                            FunctionDefinition {
-                                name: name.clone(),
-                                parameter_names: parameter_names.clone(),
-                                statements: statements.clone(),
-                                closure: environment.clone(),
-                            },
-                        )),
-                    )
-                    .map_err(CannotRedefineVariable)
+                let declaration = VariableDeclarationStatement {
+                    identifier: name.to_string(),
+                    expression: Some(Expression::AnonymousFunction {
+                        parameter_names: parameter_names.clone(),
+                        statements: statements.clone(),
+                    }),
+                };
+                declaration.execute(environment, side_effects)
             }
             Self::Print(value) => self.execute_print(environment, side_effects, value),
             Self::VariableDeclaration(declaration) => {
@@ -1076,15 +1068,13 @@ mod tests {
             EvaluationResult::Function(
                 Callables::UserDefinedFunction(
                     FunctionDefinition {
-                        name,
                         parameter_names,
                         statements,
                         closure: _,
                     }
                 )
             )
-            if name == "print_value"
-                && parameter_names.len() == 1
+            if parameter_names.len() == 1
                 && statements.len() == 1
                 && parameter_names[0] == "x"
                 && matches!(
@@ -1143,6 +1133,81 @@ mod tests {
 
         // then
         assert!(matches!(result, EvaluationError::DivideByZero));
+    }
+
+    // fun thrice(fn) {
+    //   for (var i = 1; i <= 3; i = i + 1) {
+    //     fn(i);
+    //   }
+    // }
+    //
+    // thrice(fun (a) {
+    //   print a;
+    // });
+    #[test]
+    fn function_that_accepts_function() {
+        // given
+        let loop_declaration = VariableDeclarationStatement {
+            identifier: "i".to_string(),
+            expression: Some(Expression::Literal(BigDecimal::one().into())),
+        };
+        let loop_condition = Expression::Binary {
+            operator: BinaryOperator::LessThanOrEqual,
+            left_value: Box::new(Expression::VariableReference("i".to_string())),
+            right_value: Box::new(Expression::Literal(BigDecimal::from(3).into())),
+        };
+        let loop_increment = Expression::Assignment(
+            "i".to_string(),
+            Box::new(Expression::Binary {
+                operator: BinaryOperator::Add,
+                left_value: Box::new(Expression::VariableReference("i".to_string())),
+                right_value: Box::new(Expression::Literal(BigDecimal::one().into())),
+            }),
+        );
+        let function_call = Expression::Call {
+            callee: Box::new(Expression::VariableReference("fn".to_string())),
+            arguments: vec![Expression::VariableReference("i".to_string())],
+        };
+        let for_loop = For {
+            initializer: Some(Left(loop_declaration)),
+            condition: Some(loop_condition),
+            increment: Some(loop_increment),
+            statement: Box::new(Block(vec![Statement::Expression(function_call)])),
+        };
+        let thrice_definition = Function {
+            name: "thrice".to_string(),
+            parameter_names: vec!["fn".to_string()],
+            statements: vec![Block(vec![for_loop])],
+        };
+
+        let lambda = Expression::AnonymousFunction {
+            parameter_names: vec!["a".to_string()],
+            statements: vec![Block(vec![Print(Expression::VariableReference(
+                "a".to_string(),
+            ))])],
+        };
+        let invocation = Statement::Expression(Expression::Call {
+            callee: Box::new(Expression::VariableReference("thrice".to_string())),
+            arguments: vec![lambda],
+        });
+
+        let environment = Rc::new(RefCell::new(Environment::default()));
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+
+        // when
+        thrice_definition
+            .execute(environment.clone(), side_effects.clone())
+            .unwrap();
+        invocation
+            .execute(environment.clone(), side_effects.clone())
+            .unwrap();
+
+        // then
+        let lines = &side_effects.borrow().lines;
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "1e0");
+        assert_eq!(lines[1], "2e0");
+        assert_eq!(lines[2], "3e0");
     }
 
     #[derive(Default, Clone)]
