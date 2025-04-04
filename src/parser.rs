@@ -1,3 +1,4 @@
+use crate::grammar::Expression::AnonymousFunction;
 use crate::grammar::{BinaryOperator, Expression, Literal, UnaryOperator};
 use crate::parser::FunctionKind::Function;
 use crate::parser::ParseError::{
@@ -201,32 +202,10 @@ impl Parser {
             .consume(&TokenType::Identifier, MissingFunctionName(kind))?
             .lexeme
             .clone();
-        self.consume(&TokenType::OpenParenthesis, MissingFunctionParameters(kind))?;
-        let mut parameters = vec![];
-        if !self.check(&TokenType::CloseParenthesis) {
-            loop {
-                if parameters.len() >= 255 {
-                    return Err(TooManyFunctionArguments);
-                }
-                let parameter_token = self.consume(&TokenType::Identifier, MissingParameterName)?;
-                parameters.push(parameter_token.clone());
-                if !self.token_match(&[TokenType::Comma]) {
-                    break;
-                }
-            }
-        }
-        self.consume(
-            &TokenType::CloseParenthesis,
-            UnclosedFunctionParameters(kind),
-        )?;
-        self.consume(&TokenType::OpenBrace, MissingFunctionBody(kind))?;
-        let statements = vec![self.block()?];
+        let (parameter_names, statements) = self.function_definition(Function)?;
         Ok(Statement::Function {
             name,
-            parameter_names: parameters
-                .into_iter()
-                .map(|parameter| parameter.lexeme)
-                .collect(),
+            parameter_names,
             statements,
         })
     }
@@ -236,7 +215,7 @@ impl Parser {
     /// Returns:
     /// - `Ok(Statement)` - if the entire declaration and optional can be parsed
     /// - `Err(ParseError)` - if the variable name is not defined or the initialization expression
-    ///     cannot be parsed
+    ///   cannot be parsed
     fn variable_declaration(&mut self) -> Result<Statement, ParseError> {
         let name_token = self.consume(&TokenType::Identifier, VariableNameExpected)?;
         let identifier = name_token.lexeme.clone();
@@ -399,7 +378,51 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Expression, ParseError> {
-        self.assignment()
+        if self.token_match(&[TokenType::Function]) {
+            self.anonymous_function()
+        } else {
+            self.assignment()
+        }
+    }
+
+    fn function_definition(
+        &mut self,
+        kind: FunctionKind,
+    ) -> Result<(Vec<String>, Vec<Statement>), ParseError> {
+        self.consume(&TokenType::OpenParenthesis, MissingFunctionParameters(kind))?;
+        let mut parameters = vec![];
+        if !self.check(&TokenType::CloseParenthesis) {
+            loop {
+                if parameters.len() >= 255 {
+                    return Err(TooManyFunctionArguments);
+                }
+                let parameter_token = self.consume(&TokenType::Identifier, MissingParameterName)?;
+                parameters.push(parameter_token.clone());
+                if !self.token_match(&[TokenType::Comma]) {
+                    break;
+                }
+            }
+        }
+        let parameters = parameters
+            .into_iter()
+            .map(|parameter| parameter.lexeme)
+            .collect();
+        self.consume(
+            &TokenType::CloseParenthesis,
+            UnclosedFunctionParameters(kind),
+        )?;
+        self.consume(&TokenType::OpenBrace, MissingFunctionBody(kind))?;
+        let statements = vec![self.block()?];
+        Ok((parameters, statements))
+    }
+
+    fn anonymous_function(&mut self) -> Result<Expression, ParseError> {
+        let (parameter_names, statements) = self.function_definition(Function)?;
+
+        Ok(AnonymousFunction {
+            parameter_names,
+            statements,
+        })
     }
 
     fn assignment(&mut self) -> Result<Expression, ParseError> {
@@ -584,13 +607,13 @@ impl Parser {
     /// Parameters:
     /// - `token_type` - the expected type which will advance the cursor
     /// - `conditional_error` - the parse error to return if the current token is not the expected
-    ///     type.
+    ///   type.
     ///
     /// Returns:
     /// - `Ok(&Token)` - if the token at the cursor matches the expected type and the cursor has
-    ///     since been advanced
+    ///   since been advanced
     /// - `Err(ParseError)` - if the token at the cursor did not match the expected type and the
-    ///     cursor has not been modified
+    ///   cursor has not been modified
     fn consume(
         &mut self,
         token_type: &TokenType,

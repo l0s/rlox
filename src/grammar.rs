@@ -57,7 +57,7 @@ impl Expression {
     ///
     /// Returns:
     /// - `Ok(EvaluationResult)` - if the expression could be resolved successfully. The result type
-    ///     will vary depending on the expression type and the input types
+    ///   will vary depending on the expression type and the input types
     /// - `EvaluationError` - if the expression could not be resolved
     pub fn evaluate(
         &self,

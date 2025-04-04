@@ -26,16 +26,16 @@ pub(crate) trait Callable: Display + CallableClone {
     ///
     /// Parameters:
     /// - `environment` - The current execution environment for evaluating the arguments. The
-    ///     invocation will spawn a new environment that captures the variables at the time it was
-    ///     defined.
+    ///   invocation will spawn a new environment that captures the variables at the time it was
+    ///   defined.
     /// - `side_effects` - Functions may produce side effects
     /// - `arguments` - The arguments as expressions. They will be evaluated and placed in a
-    ///     temporary environment before the function body is invoked.
+    ///   temporary environment before the function body is invoked.
     ///
     /// Returns:
     /// - `Ok(EvaluationResult)` - If the function was executed successfully
     /// - `Err(EvaluationError)` - If the number of arguments is incorrect _or_ the function could
-    ///     not be evaluated
+    ///   not be evaluated
     fn call(
         &self,
         environment: Rc<RefCell<Environment>>,
@@ -59,12 +59,12 @@ pub(crate) trait Callable: Display + CallableClone {
     /// Parameters:
     /// - `side_effects` - Functions may produce side effects
     /// - `arguments` - The evaluated arguments. They will be evaluated and placed in the
-    ///     temporary environment before the function body is invoked.
+    ///   temporary environment before the function body is invoked.
     ///
     /// Returns:
     /// - `Ok(EvaluationResult)` - If the function was executed successfully
     /// - `Err(EvaluationError)` - If the number of arguments is incorrect _or_ the function could
-    ///     not be evaluated
+    ///   not be evaluated
     fn call_with_arguments(
         &self,
         side_effects: Rc<RefCell<dyn SideEffects>>,
@@ -97,8 +97,8 @@ pub(crate) trait Callable: Display + CallableClone {
     ///
     /// Parameters:
     /// - `environment` - A new environment specific to this function. It includes all the
-    ///     (evaluated) arguments to the function and the captured variables from the time the
-    ///     function was defined.
+    ///   (evaluated) arguments to the function and the captured variables from the time the
+    ///   function was defined.
     /// - `side_effects` - Functions may produce side effects
     ///
     /// Returns:

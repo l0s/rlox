@@ -64,7 +64,7 @@ impl Interpreter {
     ///
     /// Returns:
     /// - `()`: If all the statements in the source code could be tokenized, parsed, and executed
-    ///         successfully
+    ///   successfully
     ///- `InterpreterError`: If a lexical, parsing, or execution error occurred
     pub fn run(&mut self, source: &str) -> Result<(), InterpreterError> {
         let scanner: Scanner = source.into();
@@ -348,6 +348,74 @@ counter(); // 2e0
         assert_eq!(side_effects.lines.len(), 2);
         assert_eq!(side_effects.lines[0], "1e0");
         assert_eq!(side_effects.lines[1], "2e0");
+    }
+
+    #[test]
+    fn evaluate_lambda() {
+        // given
+        let source = "
+fun thrice(fn) {
+  for (var i = 1; i <= 3; i = i + 1) {
+    fn(i);
+  }
+}
+
+thrice(fun (a) {
+  print a;
+});
+// \"1\".
+// \"2\".
+// \"3\".
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 3);
+        assert_eq!(side_effects.lines[0], "1e0");
+        assert_eq!(side_effects.lines[1], "2e0");
+        assert_eq!(side_effects.lines[2], "3e0");
+    }
+
+    #[test]
+    fn can_pass_functions_as_arguments() {
+        // given
+        let source = "
+fun thrice(fn) {
+  for (var i = 1; i <= 3; i = i + 1) {
+    fn(i);
+  }
+}
+
+fun p(a) {
+  print a;
+}
+
+thrice(p);
+// \"1\".
+// \"2\".
+// \"3\".
+";
+        let side_effects = Rc::new(RefCell::new(TestSideEffects::default()));
+        let mut interpreter = Interpreter::new(side_effects.clone());
+
+        // when
+        interpreter
+            .run(source)
+            .expect("Unable to execute source file");
+
+        // then
+        let side_effects = side_effects.borrow();
+        assert_eq!(side_effects.lines.len(), 3);
+        assert_eq!(side_effects.lines[0], "1e0");
+        assert_eq!(side_effects.lines[1], "2e0");
+        assert_eq!(side_effects.lines[2], "3e0");
     }
 
     #[derive(Default, Clone)]
