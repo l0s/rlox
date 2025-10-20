@@ -6,7 +6,7 @@ authors = ["Carlos Macasaet"]
 description = "Interpreter for the Lox language: https://craftinginterpreters.com"
 
 [dependencies]
-bigdecimal = "0.4.8"
+bigdecimal = "0.4.9"
 either = "1.15.0"
 itertools = "0.14.0"
 phf = { version = "0.13.1", features = ["macros"] }
