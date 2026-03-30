@@ -10,4 +10,4 @@ bigdecimal = "0.4.10"
 either = "1.15.0"
 itertools = "0.14.0"
 phf = { version = "0.13.1", features = ["macros"] }
-unicode-segmentation = "1.12.0"
+unicode-segmentation = "1.13.2"
